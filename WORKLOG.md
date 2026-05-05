@@ -2,6 +2,9 @@
 
 Journal de bord pour reprendre le projet sans perdre de contexte.
 
+> **Récap de la session 2026-05-05** (smoke tests, premier eval, gotchas
+> détaillés) : voir [`docs/SESSION_2026-05-05.md`](docs/SESSION_2026-05-05.md).
+
 ## Setup (fait)
 
 - VM GCP `vadimagent`, **A100 40 Go**, driver 580 / CUDA 13 (compatible binaries cu124).
