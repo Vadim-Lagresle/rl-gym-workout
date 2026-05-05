@@ -1,0 +1,77 @@
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 1
+data:
+  path: /home/v.lagresle/rl-gym-workout/AgentEval/textcraft
+  max_prompt_length: 750
+  max_response_length: 14098
+  prompt_key: item_id
+  n_samples: 1
+  output_path: null
+  batch_size: 8
+agentgym:
+  task_name: textcraft
+  env_addr: http://127.0.0.1:36005
+  max_retries: 10
+  max_rounds: 30
+  timeout: 500
+model:
+  path: /home/v.lagresle/rl-gym-workout/models/Qwen2.5-3B-Instruct
+  external_lib: null
+rollout:
+  name: vllm
+  temperature: 1
+  top_k: -1
+  top_p: 1
+  prompt_length: ${data.max_prompt_length}
+  response_length: ${data.max_response_length}
+  dtype: bfloat16
+  gpu_memory_utilization: 0.85
+  ignore_eos: false
+  enforce_eager: true
+  free_cache_engine: true
+  load_format: dummy_dtensor
+  tensor_model_parallel_size: 1
+  max_num_batched_tokens: 8192
+  max_model_len: 16384
+  max_num_seqs: 1024
+  log_prob_micro_batch_size: null
+  log_prob_micro_batch_size_per_gpu: 1
+  log_prob_use_dynamic_bsz: ${actor.use_dynamic_bsz}
+  log_prob_max_token_len_per_gpu: ${actor.ppo_max_token_len_per_gpu}
+  max_tokens: 512
+  disable_log_stats: true
+  enable_chunked_prefill: true
+  do_sample: true
+  'n': 1
+  send_interval: 1
+  rollout_log_dir: /home/v.lagresle/rl-gym-workout/executer_logs
+actor:
+  strategy: fsdp
+  ppo_mini_batch_size: 16
+  ppo_micro_batch_size: null
+  ppo_micro_batch_size_per_gpu: 1
+  use_dynamic_bsz: false
+  ppo_max_token_len_per_gpu: 16384
+  grad_clip: 1.0
+  clip_ratio: 0.2
+  entropy_coeff: 0.001
+  use_kl_loss: null
+  kl_loss_coef: 0.001
+  kl_loss_type: low_var_kl
+  ppo_epochs: 1
+  shuffle: false
+  ulysses_sequence_parallel_size: 1
+  optim:
+    lr: 1.0e-06
+    lr_warmup_steps_ratio: 0.0
+    min_lr_ratio: null
+    warmup_style: constant
+    total_training_steps: -1
+  fsdp_config:
+    wrap_policy:
+      min_num_params: 0
+    param_offload: false
+    grad_offload: false
+    optimizer_offload: false
+    fsdp_size: -1

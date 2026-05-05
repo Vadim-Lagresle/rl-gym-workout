@@ -10,7 +10,7 @@ Journal de bord pour reprendre le projet sans perdre de contexte.
 - Deux envs conda **persistent sur le disque** :
   - `**agentgym-rl`** (Python 3.10) — la stack d'entraînement
   (torch 2.4 cu124, flash-attn 2.7.3, vllm dev, ray 2.55.1, transformers 4.51.3, verl, agentenv).
-  - `**agentenv-textcraft**` (Python 3.10) — le serveur de jeu HTTP
+  - `**agentenv-textcraft`** (Python 3.10) — le serveur de jeu HTTP
   (agentenv + agentenv-textcraft + uvicorn/fastapi).
 - Serveur TextCraft validé : `textcraft --host 127.0.0.1 --port 36005` démarre OK.
 - `from verl import DataProto; from agentenv.envs import TextCraftEnvClient` passe sans erreur dans `agentgym-rl`.
@@ -87,4 +87,56 @@ Côté code :
   curl -s -X POST http://127.0.0.1:36005/create -H 'content-type: application/json' -d '{}' | python3 -m json.tool
   ```
 - Réponse attendue : `{"id": 0, "observation": "Crafting commands:\\ncraft 1 golden carrot ...\\nGoal: craft gold ingot.", "done": false, "reward": 0}`
+
+## Mini-cycle EnvClient sans LLM (validé le 2026-05-05)
+
+- Script : `scratch/01_minicycle.py` (à lancer dans env conda `agentgym-rl`).
+- Cycle : `TextCraftEnvClient(...)` → `reset(0)` → 3 `step` → reward=1, done=True.
+- Tâche #0 du dataset = "craft gold ingot" ; résolue en `inventory → get 9 gold nugget → craft 1 gold ingot using 9 gold nugget`.
+- **Lenteur cold-start : ~8min30 pour 3 calls HTTP**. Le serveur répond en ms, c'est l'import `from agentenv.envs import TextCraftEnvClient` (qui charge verl + torch + ray etc.) qui prend tout ce temps. Non bloquant mais à creuser si on veut un dev loop rapide.
+
+## Modèle Qwen2.5-3B-Instruct téléchargé (2026-05-05)
+
+- Commande : `huggingface-cli download Qwen/Qwen2.5-3B-Instruct --local-dir models/Qwen2.5-3B-Instruct` (depuis env `agentgym-rl`).
+- Chemin : `models/Qwen2.5-3B-Instruct/` (dossier `models/` ajouté au `.gitignore`).
+- Taille : 5.8 Go (2 shards safetensors + tokenizer + configs).
+- Download time : ~58 s sur la VM GCP.
+- **Gotcha sandbox Cursor + DNS** : avec `required_permissions: ["full_network"]`, `huggingface.co` ne se résout PAS dans le sandbox (`Temporary failure in name resolution`). Il faut `required_permissions: ["all"]` pour que le download fonctionne (sandbox complètement désactivé).
+
+## Dataset AgentGym-RL-Data-ID téléchargé (2026-05-05)
+
+- Commande : `huggingface-cli download AgentGym/AgentGym-RL-Data-ID --repo-type dataset --local-dir AgentEval`
+- Taille : 7.9 Mo (juste des JSONs : 100 items par tâche, format `{"item_id": "<task>_<idx>"}`).
+- Structure : `AgentEval/eval/<task>_test.json` et `AgentEval/train/<task>_train.json`.
+
+## Eval verl `main_generation.py` ÉCHOUE en single-GPU (2026-05-05)
+
+`examples/eval/textcraft_eval.local.sh` (version patchée upstream) crash en SIGSEGV
+silencieux dans `wg.init_model()`, juste après `NCCL version 2.20.5+cuda12.4`.
+- Symptôme : `ray.exceptions.ActorDiedError: ... Worker exit type: SYSTEM_ERROR`,
+  pas de stack trace côté Python.
+- Pas un OOM (RAM/GPU libres), pas un driver mismatch (vLLM standard fonctionne).
+- Cause identifiée : `verl.third_party.vllm` est un fork forké pour le training PPO
+  multi-GPU avec FSDP. Avec `load_format=dummy_dtensor` (default), il init vLLM avec
+  des poids random et attend qu'on patche les vrais poids depuis un DTensor FSDP.
+  Pour un modèle HF brut + 1 GPU, l'init NCCL crash.
+- Forcer `load_format=safetensors` ne suffit pas : le crash persiste.
+- Test isolant : `scratch/02_vllm_standalone.py` charge Qwen-3B avec vLLM standard
+  et génère normalement → confirme que le bug est dans le fork verl, pas dans vLLM.
+
+**Workaround** : on évalue avec un script standalone (vLLM standard + agentenv).
+
+## Eval Qwen-3B-Instruct sur TextCraft (2026-05-05) — script custom
+
+- Script : `scratch/03_eval_qwen.py` (vLLM standard + `TextCraftEnvClient`, ~150 lignes).
+- Smoke test 7 items : Pass@1 = **4/7 = 57%** (variance haute, on lancera les 100 ensuite).
+- Logs détaillés des trajectoires : `scratch/eval_logs/textcraft_<id>.json`.
+- **Observation pédagogique :**
+  - Quand Qwen réussit : 2-6 tours, raisonnement clair "get → craft".
+  - Quand Qwen échoue : timeout à 30 tours, **principalement à cause de violations
+    du format** (plusieurs `Action:` dans une réponse → l'env rejette, Qwen ne
+    corrige pas, boucle infinie). Aussi des erreurs de planification (croit qu'il
+    faut craft un sub-item alors que `get` marche directement).
+  - C'est exactement le terrain où le RL multi-tour aide : apprendre à respecter
+    le format et à mieux planifier.
 
