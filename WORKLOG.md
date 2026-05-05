@@ -143,3 +143,31 @@ silencieux dans `wg.init_model()`, juste après `NCCL version 2.20.5+cuda12.4`.
   - C'est exactement le terrain où le RL multi-tour aide : apprendre à respecter
     le format et à mieux planifier.
 
+## Mode resume + run partiel sur VM stable (2026-05-05 fin de journée)
+
+- Migration VM Spot → VM standard (A100 non-spot) faite via snapshot du disque
+  persistant. La nouvelle VM hérite de tout (conda envs, modèle, dataset, logs).
+- Ajout d'un **mode resume** dans `scratch/03_eval_qwen.py` : au démarrage, le
+  script liste les items qui ont déjà un JSON valide dans `scratch/eval_logs/`
+  et les skip. Pratique en cas d'arrêt VM ou de préemption.
+  - Variable d'env `FORCE_REDO=1` pour ignorer les logs précédents et tout rerun.
+  - Le tokenizer + vLLM ne sont chargés QUE s'il y a au moins 1 item à faire
+    (gain de ~30 s en cas de full-resume).
+- Run partiel lancé : 70 items prévus, 42 effectués avant arrêt volontaire pour
+  fin de journée. Total loggués dans `scratch/eval_logs/` : **73 items**
+  (30 originaux + 42 du nouveau run + 1 fichier orphelin `textcraft_420.json`
+  d'un test antérieur, à ignorer pour les stats finales).
+- **Pass@1 partiel sur 73 logs** : 18 succès → 24.7 %. Note : ce chiffre est
+  biaisé par la difficulté décroissante (les 30 premiers item_id du dataset
+  semblent plus simples que les item_id 140-180 explorés ensuite — Qwen-3B a
+  enchaîné 22 timeouts d'affilée sur la fin du run).
+- Reste **27 items à faire** demain sur les 100 de l'éval officielle.
+- **Reprise demain matin** : VPN ON sur le Mac, démarrer la VM, reconnecter
+  Cursor SSH, puis :
+  1. terminal A : `cd ~/rl-gym-workout/AgentGym/agentenv-textcraft &&
+     conda activate agentenv-textcraft && textcraft --host 127.0.0.1 --port 36005`
+  2. terminal B : `cd ~/rl-gym-workout && conda activate agentgym-rl &&
+     python scratch/03_eval_qwen.py`
+  Le mode resume va automatiquement skipper les 73 déjà faits et terminer les
+  27 derniers (~25 min).
+
