@@ -19,8 +19,15 @@ Pré-requis :
 
 Lancement :
     conda activate agentgym-rl
-    python scratch/03_eval_qwen.py             # full eval (100 items)
+    python scratch/03_eval_qwen.py             # full eval (100 items, resume si déjà fait)
     MAX_ITEMS=7 python scratch/03_eval_qwen.py # smoke test
+    FORCE_REDO=1 python scratch/03_eval_qwen.py # ignore les logs précédents
+
+Mode resume (par défaut) : si un item a déjà un log valide dans
+`scratch/eval_logs/<item_id>.json`, on le charge au lieu de refaire le
+rollout. Pratique pour reprendre après une interruption (préemption Spot,
+SIGTERM volontaire, etc.) ou pour ne réévaluer qu'un sous-ensemble. Mettre
+`FORCE_REDO=1` pour tout recalculer.
 """
 
 from __future__ import annotations
@@ -46,6 +53,7 @@ LOG_DIR.mkdir(parents=True, exist_ok=True)
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 MAX_ROUNDS = 30
 MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "0"))  # 0 = tout
+FORCE_REDO = bool(int(os.environ.get("FORCE_REDO", "0")))
 
 SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
@@ -141,60 +149,102 @@ def write_episode_log(result: EpisodeResult) -> None:
         json.dump(payload, f, indent=2)
 
 
+def load_existing_log(item_id: str) -> EpisodeResult | None:
+    """Charge un log précédent si présent et valide ; sinon None (=> à rerun)."""
+    fp = LOG_DIR / f"{item_id}.json"
+    if not fp.exists():
+        return None
+    try:
+        with fp.open() as f:
+            d = json.load(f)
+        required = {"item_id", "item_idx", "reward", "done", "rounds", "duration_s"}
+        if not required.issubset(d):
+            return None
+        return EpisodeResult(
+            item_id=d["item_id"],
+            item_idx=d["item_idx"],
+            reward=float(d["reward"]),
+            done=bool(d["done"]),
+            rounds=int(d["rounds"]),
+            duration_s=float(d["duration_s"]),
+            transcript=d.get("transcript", []),
+        )
+    except (json.JSONDecodeError, KeyError, ValueError):
+        return None
+
+
 def main() -> None:
     with DATASET_PATH.open() as f:
         items = json.load(f)
     if MAX_ITEMS > 0:
         items = items[:MAX_ITEMS]
-    print(f"[eval] {len(items)} items will be evaluated.")
 
-    print("[eval] Loading vLLM (this takes ~10-30s)...")
-    llm = LLM(
-        model=str(MODEL_PATH),
-        enforce_eager=True,
-        gpu_memory_utilization=0.85,
-        max_model_len=16384,
-        dtype="bfloat16",
-        load_format="safetensors",
-        tensor_parallel_size=1,
-        enable_prefix_caching=True,
+    cached: list[EpisodeResult] = []
+    todo: list[dict] = []
+    for it in items:
+        existing = None if FORCE_REDO else load_existing_log(it["item_id"])
+        if existing is not None:
+            cached.append(existing)
+        else:
+            todo.append(it)
+
+    print(
+        f"[eval] {len(items)} total items. "
+        f"{len(cached)} cached (skipped), {len(todo)} to run."
     )
-    tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH))
-    sampling = SamplingParams(temperature=1.0, top_p=1.0, max_tokens=512)
 
-    client = TextCraftEnvClient(
-        env_server_base=ENV_SERVER_URL, data_len=len(items), timeout=60
-    )
-    print(f"[eval] Connected to env server (env_id={client.env_id}).")
-
-    results: list[EpisodeResult] = []
-    overall_t0 = time.time()
-    for i, item in enumerate(items):
-        item_id = item["item_id"]
-        try:
-            r = run_episode(llm, tokenizer, client, sampling, item_id)
-        except Exception as e:
-            print(f"[eval][{i+1}/{len(items)}] {item_id} CRASHED: {e}")
-            continue
-        write_episode_log(r)
-        status = "DONE" if r.done else "TIMEOUT"
-        print(
-            f"[eval][{i+1}/{len(items)}] {item_id} reward={r.reward} "
-            f"rounds={r.rounds} dur={r.duration_s:.1f}s [{status}]"
+    new_results: list[EpisodeResult] = []
+    if todo:
+        print("[eval] Loading vLLM (this takes ~10-30s)...")
+        llm = LLM(
+            model=str(MODEL_PATH),
+            enforce_eager=True,
+            gpu_memory_utilization=0.85,
+            max_model_len=16384,
+            dtype="bfloat16",
+            load_format="safetensors",
+            tensor_parallel_size=1,
+            enable_prefix_caching=True,
         )
-        results.append(r)
+        tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH))
+        sampling = SamplingParams(temperature=1.0, top_p=1.0, max_tokens=512)
 
-    print(f"\n[eval] Total wall time: {time.time() - overall_t0:.1f}s")
-    if not results:
+        client = TextCraftEnvClient(
+            env_server_base=ENV_SERVER_URL, data_len=len(todo), timeout=60
+        )
+        print(f"[eval] Connected to env server (env_id={client.env_id}).")
+
+        overall_t0 = time.time()
+        for i, item in enumerate(todo):
+            item_id = item["item_id"]
+            try:
+                r = run_episode(llm, tokenizer, client, sampling, item_id)
+            except Exception as e:
+                print(f"[eval][{i+1}/{len(todo)}] {item_id} CRASHED: {e}")
+                continue
+            write_episode_log(r)
+            status = "DONE" if r.done else "TIMEOUT"
+            print(
+                f"[eval][{i+1}/{len(todo)}] {item_id} reward={r.reward} "
+                f"rounds={r.rounds} dur={r.duration_s:.1f}s [{status}]"
+            )
+            new_results.append(r)
+        print(f"\n[eval] Wall time on new rollouts: {time.time() - overall_t0:.1f}s")
+
+    all_results = cached + new_results
+    if not all_results:
         print("[eval] No results to summarize.")
         return
-    avg_reward = sum(r.reward for r in results) / len(results)
-    pass_rate = sum(1 for r in results if r.reward > 0) / len(results)
+    avg_reward = sum(r.reward for r in all_results) / len(all_results)
+    pass_rate = sum(1 for r in all_results if r.reward > 0) / len(all_results)
+    print("=" * 50)
+    print(f"GLOBAL STATS over {len(all_results)} items")
+    print(f"  ({len(cached)} cached + {len(new_results)} fresh)")
     print("=" * 50)
     print(f"Avg@1   = {avg_reward:.4f}")
-    print(f"Pass@1  = {pass_rate:.4f}  ({sum(1 for r in results if r.reward > 0)}/{len(results)})")
-    print(f"Mean rounds = {sum(r.rounds for r in results) / len(results):.1f}")
-    print(f"Mean duration = {sum(r.duration_s for r in results) / len(results):.1f}s")
+    print(f"Pass@1  = {pass_rate:.4f}  ({sum(1 for r in all_results if r.reward > 0)}/{len(all_results)})")
+    print(f"Mean rounds = {sum(r.rounds for r in all_results) / len(all_results):.1f}")
+    print(f"Mean duration = {sum(r.duration_s for r in all_results) / len(all_results):.1f}s")
     print(f"Logs: {LOG_DIR}/")
     print("=" * 50)
 
