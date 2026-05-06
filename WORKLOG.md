@@ -282,4 +282,56 @@ du temps dans un vrai run.
 - **Plan B validé : TRL+GRPO** sur notre boucle multi-tour custom
   (`scratch/03_eval_qwen.py`) avec un squelette de training minimal.
 
+## Phase C — Plan B TRL+GRPO (2026-05-06 fin d'après-midi)
+
+Objectif : valider qu'on peut entraîner un policy gradient en single-GPU
+sur TextCraft sans dépendre du fork `verl.third_party.vllm`.
+
+### Setup technique
+
+- Création d'un env conda dédié : `trl-grpo` (isolé de `agentgym-rl` pour
+  ne pas casser les versions déjà stables du projet principal).
+- Stack validée dans `trl-grpo` :
+  - `torch==2.6.0+cu124`
+  - `transformers==4.57.1`
+  - `trl==1.3.0`
+  - `peft`, `accelerate`, `datasets`
+- `agentenv` installé en editable dans cet env pour réutiliser
+  `TextCraftEnvClient`.
+
+### Implémentation
+
+- Nouveau script : `scratch/07_trl_grpo_textcraft_smoke.py`
+  - charge le split train TextCraft
+  - construit des prompts chat alignés avec le baseline eval
+  - entraîne avec `GRPOTrainer` + LoRA (pour tenir la VRAM)
+  - reward custom TextCraft
+- Version finale du reward : **multi-action simulée**
+  - extrait toutes les lignes `Action: ...` d'une completion
+  - les exécute séquentiellement dans l'env (jusqu'à `MAX_SIM_ROUNDS=20`)
+  - reward = sparse succès + shaping (valid/invalid steps, répétitions, overflow)
+  - ce n'est pas encore un vrai rollout interactif turn-by-turn, mais bien
+    plus proche du multi-tour qu'un reward 1-step.
+
+### Résultats des smoke tests
+
+- Tentative 1 : KO (`AttributeError` sur `reward_func.__name__`)
+- Tentative 2 : KO (OOM optimizer)
+- Tentative 3 : KO (`generation_batch_size` non divisible par `num_generations`)
+- **Tentative 4 : OK**
+  - run: `--max-items 16 --max-steps 1 --num-generations 2`
+  - `exit_code=0`, métriques GRPO produites
+- **Test plus robuste : OK**
+  - run: `--max-items 32 --max-steps 3 --num-generations 2`
+  - `exit_code=0`
+  - `train_runtime ~17s`, 3 steps exécutés, losses/rewards/entropy loggés
+
+### Conclusion opérationnelle
+
+- **Plan B TRL+GRPO est viable** en single-GPU sur cette VM.
+- La prochaine étape est d'implémenter un vrai rollout interactif (génération
+  action par action avec feedback env entre les tours) via `rollout_func` de
+  TRL, puis de lancer un training plus long (50-100 steps) avec eval périodique
+  sur nos 100 items test.
+
 
