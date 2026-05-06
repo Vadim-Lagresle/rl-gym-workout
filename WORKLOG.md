@@ -392,4 +392,21 @@ interactif pendant la génération (assistant -> env.step -> observation user ->
   - `rewards/textcraft_reward/mean` positif (~0.36) sur ce test court,
   - donc le reward interactif renvoie bien un gradient exploitable.
 
+### Run intermédiaire 10 steps (2026-05-06, soirée)
+
+- Objectif : confirmer la stabilité de la version interactive sur un horizon
+  un peu plus long avant un éventuel run 50–100 steps.
+- Commande :
+  - env: `trl-grpo`
+  - `python scratch/07_trl_grpo_textcraft_smoke.py --max-items 64 --max-steps 10 --num-generations 2 --run-name trl_grpo_rolloutfunc_v2_step10`
+- Setup :
+  - serveur TextCraft relancé proprement (`textcraft --host 127.0.0.1 --port 36005`)
+  - vérifié `Application startup complete` avant de lancer le trainer.
+- Statut : run en cours au moment de cette mise à jour (progress bar `0/10`,
+  modèle chargé, GRPOTrainer instancié sans warning bloquant).
+- Hypothèse de durée : ~15-20 min (step_time observé ~111s × 10 steps + setup),
+  à valider avec le `train_runtime` final.
+- Prochaine action après ce run : faire une eval de contrôle avec
+  `scratch/03_eval_qwen.py` sur quelques items pour voir si le Pass@1 bouge
+  vs la baseline 18%.
 
