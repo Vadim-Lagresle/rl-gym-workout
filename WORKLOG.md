@@ -238,4 +238,48 @@ mode resume → 23 items restants exécutés ce matin. **100/100 items évalués
   `scratch/03_eval_qwen.py`) ou **TRL** (HuggingFace). Détails à figer dans
   le prochain doc de session.
 
+## Phase B — smoke test training AgentGym-RL (2026-05-06)
+
+Objectif : vérifier si le training upstream `verl.agent_trainer.main_ppo`
+marche en single-GPU (A100 40 Go) pour Qwen2.5-3B-Instruct, avant d'investir
+du temps dans un vrai run.
+
+### Config test
+
+- Script local créé : `examples/train/AgentGym-RL/textcraft_train.local.sh`
+  (copie de l'upstream, sans toucher `textcraft_train.sh` original).
+- Overrides clés:
+  - `trainer.n_gpus_per_node=1`, `trainer.nnodes=1`
+  - `trainer.total_training_steps=1` (smoke test pur)
+  - `algorithm.adv_estimator=grpo`
+  - `actor_rollout_ref.rollout.tensor_model_parallel_size=1`
+  - `actor_rollout_ref.rollout.load_format=safetensors`
+  - `actor_rollout_ref.model.path=/home/v.lagresle/rl-gym-workout/models/Qwen2.5-3B-Instruct`
+  - `data.train_batch_size=4`, `rollout.n=2`, `rounds=20`
+- Serveur TextCraft relancé sur `127.0.0.1:36005` hors sandbox.
+
+### Résultat
+
+- **ÉCHEC en ~36 secondes, avant le step 1.**
+- Le run atteint:
+  - `dataset len: 374`
+  - `Size of train dataloader: 93`
+  - `Total training steps: 1`
+  - puis crash pendant `trainer.init_workers()` à l'init de la ref policy.
+- Trace finale:
+  - `ray.exceptions.ActorDiedError`
+  - `Worker exit type: SYSTEM_ERROR`
+  - juste après `NCCL version 2.20.5+cuda12.4`
+  - stack: `trainer.init_workers() -> self.ref_policy_wg.init_model()`
+    (`ray_trainer.py:607`)
+- Ce pattern est **identique** au crash de l'eval upstream (`main_generation.py`)
+  observé la veille : probable SIGSEGV dans le fork `verl.third_party.vllm`
+  sur notre setup 1 GPU + modèle HF brut.
+
+### Décision
+
+- Stopper la piste \"forcer verl à marcher\" pour ne pas perdre de temps.
+- **Plan B validé : TRL+GRPO** sur notre boucle multi-tour custom
+  (`scratch/03_eval_qwen.py`) avec un squelette de training minimal.
+
 
