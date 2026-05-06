@@ -354,4 +354,42 @@ sur TextCraft sans dépendre du fork `verl.third_party.vllm`.
   - Un run a échoué uniquement par race condition (trainer lancé quelques
     secondes avant le serveur), puis rerun OK une fois le serveur prêt.
 
+## Phase C bis — rollout interactif via `rollout_func` TRL (2026-05-06, soirée)
+
+Objectif : passer du reward \"open-loop\" (parsing post-hoc) à un vrai mini-loop
+interactif pendant la génération (assistant -> env.step -> observation user -> ...).
+
+### Implémentation
+
+- `scratch/07_trl_grpo_textcraft_smoke.py` patché :
+  - ajout de `textcraft_rollout_func(prompts, trainer)` (API TRL expérimentale),
+  - pour chaque sample, on crée un `TextCraftEnvClient`, reset par item, puis
+    boucle de tours:
+    1) rendu prompt chat,
+    2) génération d'un assistant turn via `trainer._generate_single_turn(...)`,
+    3) extraction de la première `Action:`,
+    4) appel `env.step(...)`,
+    5) ajout de l'observation comme message user.
+  - les `completion_ids` et `logprobs` sont concaténés sur tous les tours et
+    renvoyés au trainer pour la loss GRPO.
+- La reward function lit désormais `episode_reward` et `invalid_steps` passés en
+  extra fields par `rollout_func`.
+- `environment_factory` TRL a été abandonné (requiert `transformers>=5.2.0`,
+  incompatible avec notre stack stable 4.57.1). Gestion d'env faite directement
+  dans `rollout_func`.
+
+### Validation
+
+- Run test:
+  - `--max-items 16 --max-steps 2 --num-generations 2`
+  - run name: `trl_grpo_rolloutfunc_v2_step2`
+  - résultat: **succès (`exit_code=0`)**
+- Performance:
+  - stable, pas d'OOM ni crash,
+  - mais **beaucoup plus lent** (step_time ~111s au step 1) car chaque step
+    contient une vraie interaction multi-tour avec l'env.
+- Signal reward:
+  - `rewards/textcraft_reward/mean` positif (~0.36) sur ce test court,
+  - donc le reward interactif renvoie bien un gradient exploitable.
+
 
