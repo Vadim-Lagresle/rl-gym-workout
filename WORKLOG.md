@@ -334,4 +334,24 @@ sur TextCraft sans dépendre du fork `verl.third_party.vllm`.
   TRL, puis de lancer un training plus long (50-100 steps) avec eval périodique
   sur nos 100 items test.
 
+### Itération suivante (2026-05-06, soirée) — test intermédiaire 20 steps
+
+- `scratch/07_trl_grpo_textcraft_smoke.py` a été amélioré avec un reward
+  **multi-action simulé** :
+  - extraction de toutes les lignes `Action: ...` de la completion,
+  - exécution séquentielle dans TextCraft (`MAX_SIM_ROUNDS=20`),
+  - shaping léger: bonus/pénalités selon feedback env (`Could not`, `Error`,
+    répétitions, dépassement de rounds).
+- Run lancé :
+  - env: `trl-grpo`
+  - commande: `python scratch/07_trl_grpo_textcraft_smoke.py --max-items 128 --max-steps 20 --num-generations 2 --run-name trl_grpo_step20_multiaction`
+  - résultat: **succès (`exit_code=0`)**
+  - `train_runtime`: ~88s pour 20 steps.
+- Observations :
+  - Le pipeline reste stable (pas de crash Ray/NCCL, pas d'OOM).
+  - La reward moyenne reste proche de 0 sur ce mini run (normal pour une
+    première reward shaping encore brute + dataset difficile).
+  - Un run a échoué uniquement par race condition (trainer lancé quelques
+    secondes avant le serveur), puis rerun OK une fois le serveur prêt.
+
 
