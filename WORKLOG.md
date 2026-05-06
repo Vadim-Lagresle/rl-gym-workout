@@ -171,3 +171,71 @@ silencieux dans `wg.init_model()`, juste après `NCCL version 2.20.5+cuda12.4`.
   Le mode resume va automatiquement skipper les 73 déjà faits et terminer les
   27 derniers (~25 min).
 
+## Eval Qwen-3B FINALE sur TextCraft 100 items (2026-05-06)
+
+Reprise sur la nouvelle VM stable (créée depuis le snapshot du 2026-05-05),
+mode resume → 23 items restants exécutés ce matin. **100/100 items évalués**.
+
+### Résultats finaux
+
+| Métrique | Valeur |
+|---|---|
+| **Pass@1** | **18 / 100 = 18.0 %** |
+| Avg@1 | 0.18 |
+| Mean rounds (succès) | 7.2 |
+| Mean rounds (échec) | 30.0 (= MAX_ROUNDS) |
+| Mean duration / item | 63.4 s |
+| Total cumulated rollout time | ~106 min |
+
+### Observations qualitatives clés
+
+- **Tous les échecs sont des timeouts à 30 tours**, pas des `done=true` avec
+  reward=0. Qwen-3B-Instruct ne sait jamais "abandonner" proprement, il boucle
+  jusqu'à la limite. Implication directe : **un signal de progrès intermédiaire
+  (process reward) ou une pénalité de longueur pourrait beaucoup aider** pour
+  un futur RL.
+- **Les succès sont très rapides (mean 7.2 tours)** : quand le modèle "voit" la
+  recette, il converge en quelques actions. Le problème principal est donc la
+  *robustesse de planification*, pas la complexité de la solution finale.
+- **Ratio succès/échec varie fortement avec l'index de l'item** : les 30
+  premiers items du dataset sont à ~43 % Pass@1, les items 140-180 à ~10 %.
+  La difficulté n'est pas uniforme, ce qui plaide pour un curriculum
+  intelligent (apprendre sur le facile d'abord, complexifier ensuite).
+
+### Gotchas découverts ce matin
+
+- **Mac en veille = SSH disconnect**. Si on lance un long job (eval, training)
+  et qu'on laisse le Mac en veille, la session SSH Cursor tombe. Le job
+  continue côté VM (les processes sont indépendants), MAIS Cursor ne voit
+  plus rien et le `cwd` revient sur le Mac local. Trois solutions possibles :
+  1. Garder le Mac réveillé : `caffeinate -d` dans un terminal local pendant
+     toute la session.
+  2. Désactiver la mise en veille en Settings > Battery > "Prevent automatic
+     sleeping when display is off" (ou équivalent).
+  3. Ajouter dans `~/.ssh/config` côté Mac : `ServerAliveInterval 60` et
+     `ServerAliveCountMax 30` pour que SSH ping le serveur toutes les 60 s.
+  Solution la plus pragmatique : option 3 + `caffeinate -d` quand on lance
+  un eval/training long.
+- **`nvidia-smi` plante dans le sandbox Cursor** mais marche en `["all"]`.
+  Le sandbox Cursor par défaut bloque l'accès aux device nodes `/dev/nvidia*`,
+  même quand l'utilisateur est root. Pour tout ce qui touche le GPU
+  (`nvidia-smi`, vLLM, training), toujours utiliser `required_permissions:
+  ["all"]`. Pas un vrai problème (on le faisait déjà), juste à savoir pour
+  ne pas paniquer si on voit `NVIDIA-SMI has failed to communicate with the
+  driver` lors d'un check rapide.
+- **Process orphan après `kill` du shell wrapper**. Hier soir, le subagent a
+  kill le shell ID du run d'eval mais le process Python child (PID 4830) a
+  survécu en orphan et a continué à logger ~3 min. Lesson : toujours faire
+  un `ps aux | grep python.*eval` après un kill pour vérifier qu'il n'y a
+  pas de zombies, et killer explicitement les PID python.
+
+### Décisions stratégiques notées
+
+- **AgentGym (le serveur d'env + le client) garde sa valeur** : on ne
+  réimplémentera pas TextCraft. Mais **AgentGym-RL (verl + scripts) n'apporte
+  pas grand-chose** dans notre contexte single-GPU + research. Pour le
+  training, on partira sur **mini-PPO from-scratch** (par-dessus notre
+  `scratch/03_eval_qwen.py`) ou **TRL** (HuggingFace). Détails à figer dans
+  le prochain doc de session.
+
+
