@@ -184,7 +184,91 @@ Pour la suite (runs >100 steps, scaling sur Qwen-7B, ajout d'un 2e env), est-ce 
 
 ---
 
-## Annexe — Fichiers clés du repo (descriptions détaillées)
+## Annexe A — FAQ technique
+
+Ces clarifications ont été demandées en réunion de cadrage interne. Elles sont conservées ici pour éviter d'avoir à les ré-expliquer.
+
+### A.1 — C'est quoi NCCL ?
+
+**NVIDIA Collective Communications Library** : la lib bas-niveau qui permet à plusieurs GPUs (sur la même machine ou en cluster) de se synchroniser pendant un training distribué — all-reduce des gradients, all-gather des poids shardés, broadcast, etc. Sans NCCL, pas de training multi-GPU efficace. Notre crash : `verl` essaie d'initialiser un process group NCCL (à 2+ ranks) même quand on a 1 GPU. Le code part du principe qu'il y a du sharding à faire ; à 1 rank, NCCL refuse d'initialiser → `ActorDiedError` Ray.
+
+### A.2 — verl, en détail
+
+**verl = Volcano Engine Reinforcement Learning**, framework RL pour LLMs développé par **ByteDance** (Volcano Engine = leur cloud). C'est *la* référence pour faire du RLHF à grande échelle (utilisé pour entraîner DeepSeek-R1, Qwen, etc.). Concrètement il apporte : les algos RL (PPO, GRPO, ReMax, RLOO, DPO), le **sharding multi-GPU** (FSDP natif PyTorch ou Megatron 3D parallelism, permet d'entraîner des modèles >70B), le **rollout rapide** (intégration vLLM pour générer les completions vite — le rollout est le bottleneck en PPO), l'**orchestration Ray** (actor / critic / reference / reward = 4 workers Ray séparés sur des GPUs différents), et la **config Hydra** (YAML hiérarchiques pour gérer 200+ hyperparamètres). Très puissant **mais conçu pour un cluster**, pas pour 1 GPU. C'est notre problème.
+
+### A.3 — AgentGym-RL = verl + ScalingInter ? Pas seulement.
+
+AgentGym-RL est composé de **trois briques** :
+
+1. **AgentGym** (les environnements) : 14 envs multi-tour packagés en serveurs HTTP + leurs `EnvClient` Python (TextCraft, WebShop, ALFWorld, BabyAI…). C'est le "zoo".
+2. **Un verl modifié** : ils ont patché verl pour supporter le **rollout multi-tour avec env-in-the-loop**. Le rollout vLLM standard de verl est single-turn ("ici un prompt, génère N tokens, fini"). AgentGym-RL ajoute le pattern "génère un assistant turn → call `env.step` → re-génère avec la nouvelle observation → ..." dans le rollout vLLM lui-même.
+3. **L'algorithme ScalingInter-RL** : un curriculum sur `max_rounds` (commence à 5 tours, augmente progressivement). C'est leur contribution scientifique propre.
+
+Donc AgentGym-RL ce n'est pas "juste pour s'éviter de réécrire PPO" : c'est un zoo d'environnements + le glue code env ↔ rollout multi-tour ↔ trainer + l'algo ScalingInter, le tout par-dessus la machinerie verl.
+
+### A.4 — verl est un fork de vLLM ?
+
+Précision importante : **vLLM n'est pas un truc RL**. vLLM = serveur d'inférence ultra-rapide pour LLMs (PagedAttention, prefix caching). Il a remplacé `transformers.generate` qui est lent et c'est devenu l'état de l'art pour servir un LLM.
+
+Mais **verl embarque sa propre version modifiée de vLLM** dans `verl/third_party/vllm/`. Pourquoi ? Pendant le RL les poids du modèle changent à chaque step. vLLM standard ne supporte pas bien le hot-reload des poids (conçu pour servir un modèle figé). Verl a besoin de lire les poids depuis FSDP (format DTensor sharded) et de les pousser dans vLLM sans repasser sur disque. Verl ajoute donc des hooks pour synchroniser actor ↔ rollout après chaque update.
+
+→ verl ≠ vLLM, mais **verl bundle un vLLM patché** (`verl.third_party.vllm`). C'est ce fork patché qui plante en single-GPU (le code path FSDP n'existe pas à 1 rank). Un vLLM standard, lui, marche très bien à 1 GPU — c'est ce qu'on utilise dans nos scripts custom.
+
+### A.5 — TRL vs verl
+
+**TRL = Transformer Reinforcement Learning**, par **Hugging Face**. Même but que verl (RL sur LLMs : PPO, DPO, GRPO, KTO…) mais philosophie inverse :
+
+| | TRL | verl |
+|---|---|---|
+| Cible | Prototype, single-process, single-GPU friendly | Cluster, scale |
+| Sharding | Via `accelerate` (FSDP, DeepSpeed) — optionnel | FSDP/Megatron — obligatoire |
+| Rollout | `transformers.generate` ou vLLM standard | vLLM forké, intégré profondément |
+| API | Pythonique, customizable, peu de YAML | Hydra YAML lourd |
+| Mainteneur | HF, très actif | ByteDance, actif mais moins ouvert |
+| Maturité multi-turn | Récent et expérimental (`rollout_func`) | Plus mature mais via AgentGym-RL |
+
+→ TRL c'est "easy mode", verl c'est "production mode". Pour 1 GPU et de la recherche flexible, TRL gagne.
+
+### A.6 — Pourquoi pas tout coder à la main ?
+
+Question légitime, surtout maintenant qu'on est sur 1 GPU. **PPO/GRPO en eux-mêmes sont ~500-800 lignes propres** ; ce n'est pas le code qui pose problème, ce sont les **détails numériques** qui rendent le RL sur LLM instable :
+
+- **Advantage estimation** correcte (GAE pour PPO, group-relative pour GRPO) → bug = gradient mort.
+- **Importance sampling ratio** + clipping PPO → bug = explosion des gradients ou updates bloquées.
+- **KL divergence** vers le modèle de référence (anti reward-hacking) → bug = collapse du modèle vers une politique dégénérée.
+- **Value loss** (PPO) ou normalisation des rewards par groupe (GRPO).
+- **Mixed precision** (bf16 pour matmul, fp32 pour la loss) → mauvais cast = NaN silencieux.
+- **Reward whitening / advantage normalization** → souvent la différence entre "ça apprend" et "ça apprend pas".
+- **Gradient checkpointing** + **LoRA** + **ZeRO/FSDP** intégrés correctement.
+
+Recoder GRPO from scratch est faisable en quelques jours. Le faire **sans bug numérique** prend typiquement **plusieurs semaines** — le RL est connu pour être instable et silencieusement faux. TRL a déjà payé ce coût (battle-tested, métriques cohérentes, intégration `peft` / `accelerate`).
+
+**Position pragmatique** : on utilise TRL pour la **machinerie GRPO** (loss, advantage, KL, clipping, optimizer), mais on **code soi-même tout ce qui est interaction multi-tour avec l'environnement** via `rollout_func`. C'est précisément le point intéressant de notre projet et il n'est pas couvert "out of the box". On garde donc l'avantage des frameworks (stabilité numérique) sans subir leurs hypothèses (multi-GPU, rollout single-turn).
+
+→ **Pas besoin de verl sur 1 GPU. Pas besoin non plus de tout coder. TRL est le sweet spot.**
+
+### A.7 — LoRA : on ne fine-tune pas tout Qwen ?
+
+Non, et c'est intentionnel. **Sans LoRA**, fine-tuner Qwen-3B en bf16 :
+
+| Composant | Mémoire |
+|---|---|
+| Poids du modèle (bf16) | ~6 Go |
+| Gradients (même dtype) | ~6 Go |
+| Optimizer Adam (m + v en fp32) | ~12 Go |
+| Activations (selon batch et seq_len) | 5-15 Go |
+| KV cache de vLLM pour le rollout | 5-10 Go |
+| **Total** | **~35-50 Go** |
+
+→ ne tient pas sur A100 40 Go avec en plus un rollout vLLM en parallèle.
+
+**Avec LoRA (rank 16)** : le modèle de base reste **figé** (pas de gradient → pas de mémoire pour ses grads/optimizer). On ajoute des **petits adaptateurs** (matrices basse-dimension `r=16`) sur les couches d'attention et MLP. Adaptateurs = ~10-20 Mo (vs 6 Go pour le full). Gradients + optimizer **uniquement sur les adaptateurs** : ~50 Mo total. On tient à l'aise.
+
+**Trade-off** : LoRA touche moins de paramètres que le full fine-tuning, donc capacité d'apprentissage moindre. Pour un fine-tuning instruct ou RL léger, c'est largement suffisant — c'est le standard practice dans 90% des fine-tunings publiés. Si on veut apprendre une nouvelle compétence radicalement différente, on voudra du full FT (et donc plus de GPU). À terme on peut **merger les LoRA dans le base model** pour récupérer un modèle "pur" si besoin.
+
+---
+
+## Annexe B — Fichiers clés du repo (descriptions détaillées)
 
 **`scratch/01_minicycle.py`** — Premier mini-script de validation (≈60 lignes) qui instancie un `TextCraftEnvClient`, fait un `reset(0)`, affiche l'observation initiale, envoie une action `inventory` factice et imprime `state / reward / done`. Aucun LLM impliqué. But : valider que le serveur HTTP TextCraft tourne et que le client Python parle bien avec lui, avant d'introduire la complexité de vLLM ou du training.
 
