@@ -458,6 +458,17 @@ réviser `max_completion_length`, augmenter `per_device_train_batch_size`. C'est
 la première amélioration structurelle à faire — plus impactante que de toucher
 au reward shaping ou au curriculum.
 
+**Mesure réelle pendant le run 50 steps (2026-05-11)** : à N=2 on consomme
+37,4 Go / 40 Go (91 % de pleine charge), il reste ~3 Go libres. Donc N=3
+aurait été faisable d'entrée (j'ai été trop conservateur sur le run 10 steps),
+N=4 risqué, N=8 infaisable sans toucher autre chose. Si on doit rester sur
+l'A100 40 Go pour le prochain run, deux leviers pour grimper N : (a) baisser
+`max_completion_length` de 128 à 96 (~25 % d'économie d'activations par
+completion, ouvre N=4), (b) baisser `MAX_SIM_ROUNDS` de 20 à 12 (économie de
+KV cache pendant la génération, peut permettre N=6 combiné au point a). Mais
+ces compromis dégradent la qualité du training. Idéalement on saute à N=8 sur
+un GPU plus gros.
+
 ### 3. Levier "syntax normalizer" en amont de TextCraft
 
 TextCraft a un parser **strictement rule-based regex** (3 verbes seulement :
