@@ -539,3 +539,125 @@ l'écosystème qu'on utilise déjà. Beaucoup plus léger qu'un deuxième LLM
 complet, et le decoupling "format vs stratégie" est le même que celui du
 normalizer.
 
+## Phase D — 50-step training run + eval (2026-05-11)
+
+Premier run "long" de TRL+GRPO sur TextCraft : passage de 10 → 50 steps avec
+un dataset un peu plus diversifié (256 items au lieu de 64), même
+configuration que step10 par ailleurs (N=2, LoRA r=16, max_completion 128,
+shaping inchangé).
+
+### Commandes exactes
+
+Phase 1 (terminer step10 sur les 100 items) :
+
+```
+# panneau A
+conda activate agentenv-textcraft
+cd /home/v.lagresle/rl-gym-workout/AgentGym/agentenv-textcraft
+textcraft --host 127.0.0.1 --port 36005
+
+# panneau B
+conda activate agentgym-rl
+cd /home/v.lagresle/rl-gym-workout
+LORA_PATH=saves/trl_grpo/trl_grpo_rolloutfunc_v2_step10/checkpoint-10 \
+  EVAL_TAG=step10 python scratch/08_eval_qwen_lora.py
+```
+
+Phase 2 (training step50) :
+
+```
+conda activate trl-grpo
+python scratch/07_trl_grpo_textcraft_smoke.py \
+  --max-items 256 --max-steps 50 --num-generations 2 \
+  --run-name trl_grpo_rolloutfunc_v2_step50
+```
+
+Phase 3 (eval step50) :
+
+```
+conda activate agentgym-rl
+LORA_PATH=saves/trl_grpo/trl_grpo_rolloutfunc_v2_step50/checkpoint-50 \
+  EVAL_TAG=step50 python scratch/08_eval_qwen_lora.py
+```
+
+### Training metrics
+
+- `train_runtime` : **4032.59 s ≈ 67.2 min** (ETA estimé 45–50 min, réel
+  +35 % — `step_time` rollout entre 120 s et 220 s, plus variable que prévu).
+- `train_loss` final : 0.0430.
+- 50/50 steps complétés, exit_code=0, checkpoints `40`, `45`, `50` sauvegardés.
+
+### Trajectoire reward (`rewards/textcraft_reward/mean`)
+
+Logs émis sur les steps de rollout (impair). 25 valeurs sur 50 steps :
+
+| step | reward  | step | reward  | step | reward  | step | reward  | step | reward  |
+|-----:|--------:|-----:|--------:|-----:|--------:|-----:|--------:|-----:|--------:|
+| 1    | -0.190  | 11   | -0.170  | 21   | +0.365  | 31   | -0.205  | 41   | -0.195  |
+| 3    | -0.245  | 13   | -0.180  | 23   | **+0.950** | 33 | +0.350 | 43 | +0.350  |
+| 5    | -0.180  | 15   | -0.195  | 25   | -0.165  | 35   | -0.205  | 45   | -0.200  |
+| 7    | -0.205  | 17   | +0.385  | 27   | -0.215  | 37   | -0.155  | 47   | -0.185  |
+| 9    | -0.230  | 19   | -0.245  | 29   | -0.175  | 39   | -0.205  | 49   | -0.195  |
+
+- Premiers 5 (steps 1–9) : moyenne ≈ **−0.21**.
+- Milieu 5 (steps 21–29) : moyenne ≈ **+0.23** (tirée par les spikes 17/21/23).
+- Derniers 5 (steps 41–49) : moyenne ≈ **−0.19**.
+
+Lecture : **trajectoire oscillante, pas de tendance ascendante**. Les rares
+batches "gagnants" (4/25 logs avec reward > 0) coïncident avec des completions
+courtes (< 100–700 tokens) où le modèle réussit en 1–2 tours, exactement le
+mode collapse "1-tour ou rien" identifié dans la note méthodo §1
+(reward-shaping bug). Le run 50 steps n'a donc rien fait d'autre que renforcer
+ce reward hacking déjà observé à step10, sans permettre de progrès net.
+
+### Anomalie notée pendant le training
+
+- **Step 35–36 : `grad_norm` = 1765.89** (vs typique 0.5–4.5) sur la passe
+  gradient (loss=0.4823 quand même finie, pas de NaN, pas d'OOM, training
+  continue). Pic isolé (grad_norm reste sain ensuite : 1.2 / 4.6 / 1.3 / 6.3
+  sur les steps suivants). Probablement déclenché par le batch très favorable
+  qui précède (step 33, reward +0.350 avec completions de 109 à 1405 tokens
+  → variance énorme sur les advantages). Pas critique sur ce run, mais à
+  surveiller : si on monte les hparams (N=8, lr×2…), ce genre de spike peut
+  diverger franchement. Un `max_grad_norm` explicite (clipping) serait
+  prudent pour le run d'après.
+- Pas d'autre warning bloquant. Pas de timeout HTTP serveur. Pas de problème
+  GPU (mémoire stable à ~37 Go/40).
+
+### 3-way comparison Pass@1 sur les 100 items du test set
+
+n=100 (intersection complète, on a les 100 logs pour les trois variantes).
+
+| variante     | Pass@1   | delta vs base | delta vs step10 |
+|--------------|---------:|--------------:|----------------:|
+| baseline     | 18/100   | —             | —               |
+| LoRA step10  | 18/100   | **+0**        | —               |
+| LoRA step50  | 14/100   | **−4**        | **−4**          |
+
+Triple confusion (baseline pass, step10 pass, step50 pass) :
+
+| (B, S10, S50) | count |
+|:-------------:|------:|
+| (T, T, T)     | 4     |
+| (T, T, F)     | 6     |
+| (T, F, T)     | 4     |
+| (T, F, F)     | 4     |
+| (F, T, T)     | 3     |
+| (F, T, F)     | 5     |
+| (F, F, T)     | 3     |
+| (F, F, F)     | 71    |
+
+- Items résolus par les **trois** : 4 (les "vraiment faciles", 1-tour évidents).
+- Items résolus uniquement par baseline : 4 (perdus par les deux LoRA).
+- Items résolus uniquement par step50 : 3 (gain net mais petit).
+- Items résolus par step50 mais pas par step10 : 7 (=4+3) ; items résolus
+  par step10 mais pas par step50 : 11 (=6+5). step50 a donc un **shift net
+  négatif de −4** par rapport à step10.
+
+### Conclusion
+
+**step50 dégrade Pass@1 vs baseline (−4 pts) et vs step10 (−4 pts) ; le
+training a renforcé le reward hacking "1-tour ou rien" sans converger vers
+une stratégie multi-tour gagnante. Prochaine étape obligatoire : fixer le
+shaping (note méthodo §1) avant de relancer un run plus long.**
+
