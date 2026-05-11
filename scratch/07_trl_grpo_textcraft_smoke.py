@@ -103,6 +103,10 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
     done = [False] * n
     final_rewards = [0.0] * n
     invalid_counts = [0] * n
+    # Per-episode counters for syntax shaping at the message level (vs full
+    # concatenated completion). See WORKLOG §1 "Notes méthodologiques (2026-05-11)".
+    actions_per_turn_sum = [0] * n
+    n_active_turns = [0] * n
     env_clients: list[TextCraftEnvClient] = []
 
     # Bootstrap one env per sample with the item idx encoded in the last user turn.
@@ -150,6 +154,12 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
             text = tokenizer.decode(ids, skip_special_tokens=True)
             states[i].append({"role": "assistant", "content": text})
 
+            # Count actions inside *this* assistant message (per-turn signal).
+            # Same parser as `count_actions` so it is consistent with action extraction.
+            n_actions_this_turn = count_actions(text)
+            actions_per_turn_sum[i] += n_actions_this_turn
+            n_active_turns[i] += 1
+
             action = first_action_or_empty(text)
             step = env_clients[i].step(f"Action: {action}")
             obs = step.state
@@ -179,6 +189,21 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
         if not prompt_ids_out[i]:
             prompt_ids_out[i] = [tokenizer.eos_token_id]
 
+    # Aggregate per-message action counts to a per-episode mean (1.0 = ideal).
+    # Default to 1.0 when an episode produced 0 active turns (extremely rare; keeps shaping neutral).
+    mean_actions_per_turn = [
+        (actions_per_turn_sum[i] / n_active_turns[i]) if n_active_turns[i] > 0 else 1.0
+        for i in range(n)
+    ]
+
+    print(
+        f"[rollout] n={n} mean_n_actions_per_turn="
+        f"{[round(x, 2) for x in mean_actions_per_turn]} "
+        f"n_active_turns={n_active_turns} "
+        f"episode_reward={final_rewards} invalid_steps={invalid_counts}",
+        flush=True,
+    )
+
     return {
         "prompt_ids": prompt_ids_out,
         "completion_ids": completion_ids_out,
@@ -186,6 +211,7 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
         # Extra fields forwarded to reward function through reward_kwargs
         "episode_reward": final_rewards,
         "invalid_steps": invalid_counts,
+        "mean_n_actions_per_turn": mean_actions_per_turn,
     }
 
 
@@ -195,24 +221,40 @@ def textcraft_reward(
     completions: list[Any],
     episode_reward: list[float],
     invalid_steps: list[int],
+    mean_n_actions_per_turn: list[float],
     **kwargs: Any,
 ) -> list[float]:
+    """Reward shaping at the **per-assistant-message** granularity.
+
+    Fixes the v2 bug (WORKLOG §1, 2026-05-11): previously we counted actions on
+    the *concatenated* completion (all turns glued together), which penalized
+    every multi-turn episode. The intended signal is "1 action per assistant
+    message", which only the rollout function can compute.
+    """
     rewards: list[float] = []
+    debug_rows: list[str] = []
 
-    for comp, base_rew, bad_steps in zip(completions, episode_reward, invalid_steps, strict=True):
-        text = completion_to_text(comp)
+    for comp, base_rew, bad_steps, mean_n in zip(
+        completions, episode_reward, invalid_steps, mean_n_actions_per_turn, strict=True
+    ):
         r = float(base_rew)
-        # Shape with syntax info from generated text + env invalid step count.
-        n_actions = count_actions(text)
-        if n_actions == 0:
-            r -= 0.05
-        elif n_actions == 1:
-            r += 0.02
+        # Bonus only for the tight target zone (well-formed single-action turns).
+        if 0.9 <= mean_n <= 1.1:
+            shape = 0.02
+        elif mean_n > 1.5 or mean_n < 0.5:
+            shape = -0.05
         else:
-            r -= 0.05
+            # Soft neutral zone (0.5..0.9 or 1.1..1.5): no bonus, no malus.
+            shape = 0.0
+        r += shape
         r -= 0.01 * float(bad_steps)
-
         rewards.append(r)
+        debug_rows.append(
+            f"base={base_rew:+.3f} mean_n={mean_n:.2f} shape={shape:+.3f} "
+            f"bad={bad_steps} -> r={r:+.3f}"
+        )
+
+    print("[reward] " + " | ".join(debug_rows), flush=True)
     return rewards
 
 
@@ -242,6 +284,9 @@ def main() -> None:
         per_device_train_batch_size=1,
         gradient_accumulation_steps=1,
         learning_rate=1e-6,
+        # Explicit clip (default is also 1.0, but make intent clear after the
+        # grad_norm=1765 spike at step 35 of v2 — see WORKLOG step50 anomaly).
+        max_grad_norm=1.0,
         max_steps=args.max_steps,
         num_generations=args.num_generations,
         generation_batch_size=2,
