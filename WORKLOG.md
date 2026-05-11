@@ -499,3 +499,43 @@ et une dépendance d'inférence supplémentaire pendant le rollout. À discuter
 avec les encadrants — c'est typiquement le genre d'idée qui peut donner un
 résultat de papier à elle seule si on la prend au sérieux.
 
+**Critique honnête après revue (2026-05-11)** : sur TextCraft précisément, l'idée
+est probablement disproportionnée. La grammaire ne fait que 3 verbes regex, le
+baseline produit déjà ~75 % d'actions bien formées, et quand je creuse les 25 %
+d'échecs "de format", ce sont en réalité (a) des erreurs de **protocole**
+(plusieurs `Action:` par message), (b) des erreurs de **nomenclature** (`planks`
+au lieu de `oak_planks` — connaissance des items, pas grammaire), (c) des erreurs
+**stratégiques masquées** (`craft house using 3 wood` — syntaxiquement valide
+mais "house" n'existe pas dans le crafting tree). Un normalizer ne traite vraiment
+que (a) et une partie de (b). Le pattern reste pertinent comme angle de recherche
+sur un env plus complexe (SQL, APIs réelles), pas ici. Garder l'idée en piste
+exploratoire long terme.
+
+### 4. Trois alternatives plus directes au "syntax normalizer" pour TextCraft
+
+À traiter dans cet ordre de priorité avant de revenir au normalizer.
+
+**4.a — Fix du reward shaping (point 1 ci-dessus)**. Le bug actuel pénalise
+activement le bon comportement multi-tour. C'est le levier le plus gros à coût
+zéro. À faire dès que le run en cours est fini.
+
+**4.b — Post-processing rule-based de l'action côté client**. Avant d'envoyer
+le texte de l'agent au serveur TextCraft, intercaler une fonction Python d'une
+trentaine de lignes : garder uniquement la première ligne `Action:`, lowercase,
+normaliser espaces et underscores, mapper quelques alias connus (`wood` →
+`oak_log`, `pickaxe` → `wooden_pickaxe` par défaut, etc.). Pas de LLM, pas de
+SFT, pas de dépendance d'inférence. Devrait absorber 60-70 % des erreurs de
+format identifiées par `scratch/04_analyze_eval.py`. À implémenter dans
+`scratch/07_trl_grpo_textcraft_smoke.py::textcraft_rollout_func` (entre
+`first_action_or_empty` et `env.step`) et dans `scratch/03_eval_qwen.py` /
+`scratch/08_eval_qwen_lora.py` pour avoir le même normalisateur à l'eval.
+
+**4.c — LoRA "format" séparé du LoRA "stratégie"**. Si 4.b ne suffit pas,
+entraîner un petit LoRA dédié en SFT pur sur des paires (mauvais format → bon
+format) extraites de nos propres logs d'échec baseline. À l'inférence, stacker
+ce LoRA-format avec le LoRA-stratégie (peft supporte le stacking nativement).
+~20 Mo d'adaptateurs en plus, une seule passe d'inférence, reste dans
+l'écosystème qu'on utilise déjà. Beaucoup plus léger qu'un deuxième LLM
+complet, et le decoupling "format vs stratégie" est le même que celui du
+normalizer.
+
