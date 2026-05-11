@@ -410,3 +410,81 @@ interactif pendant la génération (assistant -> env.step -> observation user ->
   `scratch/03_eval_qwen.py` sur quelques items pour voir si le Pass@1 bouge
   vs la baseline 18%.
 
+## Notes méthodologiques à traiter (2026-05-11)
+
+Trois points identifiés en revue de méthode pendant que le run 50 steps tourne.
+À traiter une fois ce run terminé pour ne pas brouiller la comparaison
+baseline / step10 / step50.
+
+### 1. Bug de shaping dans `textcraft_reward` (à fixer après step50)
+
+`scratch/07_trl_grpo_textcraft_smoke.py::textcraft_reward` calcule `n_actions`
+via `count_actions` sur la completion **entière concaténée** (tous les tours
+collés). Du coup le bonus `+0.02` n'est attribué que si la completion totale a
+exactement 1 ligne `Action:`, et le malus `-0.05` est appliqué dès qu'il y a
+>1 action (c'est-à-dire dès qu'il y a un épisode multi-tour). L'intention
+initiale était "1 action par message d'assistant", pas "1 action sur tout
+l'épisode" — c'est un bug d'implémentation.
+
+Conséquence observée sur le run 10 steps : le modèle a appris à **tenter en 1
+tour ou abandonner**, parce que c'est ce que le shaping récompense. Trajectoire
+de reward : −0.19 (épisodes longs perdants) → +0.95 (1-tour gagnants) → +0.345
+(rechute multi-tour) → +0.95 (1-tour). Sur le test set, step10 attrape 8 items
+que le baseline ratait (items triviaux résolubles en 1 action) mais en perd 8
+autres (items complexes qu'il aurait dû résoudre en multi-tour). Cas d'école
+de reward hacking, parfaitement cohérent avec le shaping.
+
+Fix prévu : porter le décompte `n_actions` au niveau du tour, en remontant
+l'info depuis `rollout_func` (qui voit chaque tour individuellement) plutôt
+qu'en parsant la completion concaténée. Appliquer le shaping sur la moyenne
+des n_actions par tour. Lancer ensuite un step50_v2 avec ce fix pour mesurer
+l'impact net du shaping correct vs le shaping cassé.
+
+### 2. Monter `num_generations` (N) — nécessite un GPU plus gros
+
+Actuellement N=2 dans notre setup, choix imposé par la VRAM A100 40 Go (Qwen-3B
++ LoRA + référence + buffers GRPO + rollout multi-tour saturent déjà). Le
+papier AgentGym-RL utilise **N=8** (cf. `examples/train/AgentGym-RL/textcraft_train.sh`
+ligne 24, `rollout_sample_num=8`), le papier DeepSeek-GRPO va jusqu'à N=64
+sur certaines tâches.
+
+N=2 est le strict minimum pour que GRPO ait du sens (sinon avantage = 0). Avec
+N=2, le signal effectif est bruité : quand les 2 completions donnent le même
+reward (cas fréquent), `frac_reward_zero_std=1` et le step n'apprend rien.
+
+À faire dès qu'on a accès à un GPU avec ≥80 Go de VRAM (A100 80 Go, H100,
+ou idéalement **B200** pour avoir aussi plus de débit) : remonter N à 4 ou 8,
+réviser `max_completion_length`, augmenter `per_device_train_batch_size`. C'est
+la première amélioration structurelle à faire — plus impactante que de toucher
+au reward shaping ou au curriculum.
+
+### 3. Levier "syntax normalizer" en amont de TextCraft
+
+TextCraft a un parser **strictement rule-based regex** (3 verbes seulement :
+`craft X using Y`, `get N item`, `inventory`, cf. `agentenv_textcraft/environment.py`
+lignes 12-16). Aucune tolérance, aucune normalisation lexicale, aucun
+LLM-as-judge. Donc le modèle doit apprendre **deux choses indépendantes** en
+même temps : (a) la stratégie de craft, (b) la grammaire syntaxique stricte
+attendue par le serveur. 25 % des échecs baseline sont uniquement des erreurs
+de format (cf. `scratch/04_analyze_eval.py`), pas des erreurs de stratégie.
+
+Idée à explorer (curriculum) : insérer un **petit LLM SFT-é uniquement à la
+normalisation syntaxique** (par ex. un Qwen-0.5B ou 1.5B fine-tuné sur quelques
+milliers de paires "phrase naturelle → action TextCraft valide") entre l'agent
+principal et le serveur. L'agent principal travaille en langage plus naturel
+("get three oak logs", "build a crafting table"), le normalizer traduit en
+`get 3 oak_log` / `craft 1 crafting_table using 4 oak_planks`, et seul ça est
+envoyé au serveur. Bénéfices attendus :
+
+- découple la difficulté syntaxique de la difficulté stratégique pendant le
+  RL training ;
+- permet d'utiliser le baseline directement comme stratège sans qu'il soit
+  pénalisé sur la syntaxe ;
+- fournit une comparaison contrôlée "stratège seul (GRPO sur Qwen-3B normal)"
+  vs "stratège + normalizer".
+
+Coût : un petit SFT à part (donc une étape supplémentaire dans le pipeline)
+et une dépendance d'inférence supplémentaire pendant le rollout. À discuter
+avec les encadrants — c'est typiquement le genre d'idée qui peut donner un
+résultat de papier à elle seule si on la prend au sérieux.
+
