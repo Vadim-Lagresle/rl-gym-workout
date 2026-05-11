@@ -1,4 +1,4 @@
-# RL multi-turn sur LLM — point d'avancement semaine 19
+# RL multi-turn sur LLM — point d'avancement semaine 7/05
 
 *Auteur : Vadim Lagresle — semaine du 2026-05-04 au 2026-05-07*
 
@@ -17,15 +17,17 @@
 
 ## 2. Setup infrastructure
 
-| Composant | État |
-|---|---|
-| VM GCP A100 40 Go (`vadimagent`, zone `europe-west4-b`) | OK, snapshot pour repartir d'un état stable |
-| Tunnel SSH vers `gitlab.crto.in:8443` | OK |
-| Submodule `AgentGym/` (14 environnements + agentenv) | OK |
-| Env conda `agentgym-rl` (torch 2.4 cu124, vllm, ray, transformers 4.51.3, verl) | OK |
-| Env conda `agentenv-textcraft` (FastAPI/uvicorn, jeu) | OK |
-| Env conda `trl-grpo` (torch 2.6, transformers 4.57.1, trl 0.19, peft) | OK (créé après le pivot) |
-| Modèle Qwen2.5-3B-Instruct téléchargé (5.8 Go) | OK |
+
+| Composant                                                                       | État                                        |
+| ------------------------------------------------------------------------------- | ------------------------------------------- |
+| VM GCP A100 40 Go (`vadimagent`, zone `europe-west4-b`)                         | OK, snapshot pour repartir d'un état stable |
+| Tunnel SSH vers `gitlab.crto.in:8443`                                           | OK                                          |
+| Submodule `AgentGym/` (14 environnements + agentenv)                            | OK                                          |
+| Env conda `agentgym-rl` (torch 2.4 cu124, vllm, ray, transformers 4.51.3, verl) | OK                                          |
+| Env conda `agentenv-textcraft` (FastAPI/uvicorn, jeu)                           | OK                                          |
+| Env conda `trl-grpo` (torch 2.6, transformers 4.57.1, trl 0.19, peft)           | OK (créé après le pivot)                    |
+| Modèle Qwen2.5-3B-Instruct téléchargé (5.8 Go)                                  | OK                                          |
+
 
 **Architecture runtime** :
 
@@ -46,11 +48,13 @@ Côté Python, c'est `TextCraftEnvClient` qui les wrap (méthodes `reset`, `obse
 ## 3. Phase 1 — Eval baseline Qwen-3B sur TextCraft
 
 ### Pourquoi un script custom et pas le upstream
+
 Le script upstream `examples/eval/textcraft_eval.sh` utilise `verl.agent_trainer.main_generation` qui suppose **multi-GPU + FSDP + checkpoint au format spécifique**. En single-GPU avec un modèle Hugging Face brut, **NCCL crashe** (`ActorDiedError` Ray) — la pile `verl.third_party.vllm` insiste pour faire du `dummy_dtensor` sharding même sur 1 GPU.
 
 → Décision : **`scratch/03_eval_qwen.py`** = vLLM standard + `TextCraftEnvClient` + boucle multi-turn maison.
 
 ### Boucle d'eval (très simplifiée)
+
 ```python
 for item in dataset:
     env.reset(item.id)
@@ -70,15 +74,19 @@ Features ajoutées : **mode resume** (skip items déjà loggés via cache JSON),
 
 ### Résultats
 
-| Métrique | Valeur |
-|---|---|
-| Pass@1 | **18 / 100 = 18%** |
-| Avg reward | 0.18 |
-| Items évalués sur l'A100 spot | 77 (1ère VM préemptée) |
-| Items complétés sur l'A100 stable | 23 (resume) |
+
+| Métrique                          | Valeur                 |
+| --------------------------------- | ---------------------- |
+| Pass@1                            | **18 / 100 = 18%**     |
+| Avg reward                        | 0.18                   |
+| Items évalués sur l'A100 spot     | 77 (1ère VM préemptée) |
+| Items complétés sur l'A100 stable | 23 (resume)            |
+
 
 ### Analyse qualitative des échecs (`scratch/04_analyze_eval.py`)
+
 3 catégories dominantes identifiées sur les 82 échecs :
+
 - **Multi-action dans un même message** (~30%) : Qwen écrit plusieurs `Action:` d'un coup, le serveur n'en exécute qu'une et renvoie un message d'erreur.
 - **Action loops** (~20%) : répétition de la même action ≥3 fois (>40% des actions de l'épisode), souvent un `inventory` ou `craft` invalide.
 - **Env complaints** (~25%) : actions au mauvais format (`could not parse`, `wrong item format`).
@@ -90,16 +98,19 @@ Features ajoutées : **mode resume** (skip items déjà loggés via cache JSON),
 ## 4. Phase 2 — Tentative de training upstream (verl)
 
 ### Smoke test
+
 - Script local : `examples/train/AgentGym-RL/textcraft_train.local.sh`
 - Overrides Hydra forcés : `n_gpus_per_node=1`, `total_training_steps=1`, `adv_estimator=grpo`, batch sizes minimaux.
 - **Crash identique à l'eval** : `ActorDiedError` au moment où `verl.third_party.vllm` charge les poids en `dummy_dtensor`.
 
 ### Diagnostic
+
 - `verl` est **un fork lourd de vLLM** spécifique multi-GPU + FSDP.
 - Le code suppose qu'il y a au moins 2 GPUs pour faire le sharding ; en single-GPU, le code path n'est pas testé et NCCL refuse d'initialiser un groupe à 1 rank.
-- Patcher le fork prendrait des jours sans garantie de résultat.
+- Patcher le fork prendrait des jours sans garantie de résultat. Mais on peut essayer avec deux gpus A100 pour dig davantage le code.
 
 ### Décision (avec hard cap 4h respecté)
+
 **Pivot vers TRL+GRPO** plutôt que de fork verl. Coût d'opportunité accepté : on perd la feature ScalingInter-RL "out of the box" (curriculum sur `max_rounds`), à reimplémenter à la main si pertinent.
 
 Doc complémentaire produite : `docs/AGENTGYM_RL_TRAINING_DEEPDIVE.md` (RayPPOTrainer, FSDP, vLLM rollout, hooks de customisation, hyperparamètres clés).
@@ -109,6 +120,7 @@ Doc complémentaire produite : `docs/AGENTGYM_RL_TRAINING_DEEPDIVE.md` (RayPPOTr
 ## 5. Phase 3 — Pipeline TRL+GRPO custom (où on est aujourd'hui)
 
 ### Stack
+
 - Env conda dédiée `trl-grpo` (isolée des conflits transformers/torch de la stack `agentgym-rl`).
 - **GRPOTrainer** de `trl 0.19.1`.
 - **LoRA** (rank 16, alpha 32, sur tous les `*_proj`) : indispensable pour tenir Qwen-3B + grad + optimizer + KV cache sur 40 Go.
@@ -135,47 +147,57 @@ def textcraft_rollout_func(prompts, trainer):
 ```
 
 La **reward function** consomme `episode_reward` (sparse 0/1) + `invalid_steps` (count des erreurs serveur) et applique un shaping léger :
+
 - `+0.02` si exactement 1 action par message
 - `-0.05` si 0 ou >1 actions par message
 - `-0.01` par invalid step
 
 ### Pourquoi c'est non-trivial
+
 - L'API `rollout_func` de TRL est **expérimentale** (`UserWarning` à chaque run, pas documentée).
 - Une approche alternative `environment_factory` existe mais **requiert `transformers>=5.2.0`** (pas encore released) → on contourne en gérant l'env directement dans `rollout_func`.
 - Concaténer correctement les `logprobs` sur plusieurs tours, en respectant les masks de prompt vs completion, est piégeux ; bug dans cette concat = gradient incorrect = training silencieusement faux.
 
 ### Validation
-| Run | Setup | Résultat |
-|---|---|---|
-| Smoke 1 step | open-loop, multi-action simulé | OK, exit_code=0 |
-| Stability 20 steps | open-loop | OK, train_runtime ~88s |
-| Smoke 2 steps | **interactive rollout_func** | OK, reward moyen ~0.36, step_time ~111s |
-| Run 10 steps | interactive rollout_func | lancé puis interrompu (changement de GPU) — atteint 2/10 sans crash |
+
+
+| Run                | Setup                          | Résultat                                                            |
+| ------------------ | ------------------------------ | ------------------------------------------------------------------- |
+| Smoke 1 step       | open-loop, multi-action simulé | OK, exit_code=0                                                     |
+| Stability 20 steps | open-loop                      | OK, train_runtime ~88s                                              |
+| Smoke 2 steps      | **interactive rollout_func**   | OK, reward moyen ~0.36, step_time ~111s                             |
+| Run 10 steps       | interactive rollout_func       | lancé puis interrompu (changement de GPU) — atteint 2/10 sans crash |
+
 
 ---
 
 ## 6. Synthèse pour les encadrants
 
 ### Ce qu'on a appris
+
 1. **AgentGym-RL est un environnement-zoo solide, mais sa partie training (`verl` fork) est conçue pour multi-GPU.** Pas un sandbox pédagogique — pas adapté à un setup single-GPU sans investir des jours de dette technique.
 2. **Le baseline Qwen-3B fait 18% sur TextCraft.** Marge de progression réelle, en particulier sur la rigueur de format (multi-action et loops sont des "low hanging fruits" pour le RL).
 3. **TRL+GRPO + LoRA + custom rollout_func** est un setup **viable, contrôlable et fast iteration** pour faire du RL multi-turn en single-GPU. C'est notre stack de travail.
 
 ### Ce qui marche maintenant
+
 - Pipeline d'eval reproductible avec resume.
 - Pipeline de training GRPO interactif (vrai loop multi-tour avec env entre chaque action).
 - Outils d'analyse qualitative des transcripts (`scratch/04_analyze_eval.py`, `scratch/05_view_log.py` avec annotation des "vrais auteurs").
 - Tout commité/pushé sur `gitlab.crto.in:8443/v.lagresle/rl-gym-workout`, dernier commit `9a47da4`.
 
 ### Risques et zones d'ombre à challenger
+
 - **API `rollout_func` expérimentale** : peut casser à un upgrade trl. À watch.
 - **Reward shaping** : pour l'instant très simple. Reste à valider qu'il donne un gradient utile sur 50-100 steps.
 - **VRAM** : on est à la limite avec LoRA sur A100 40 Go. Si on veut tester Qwen-7B il faudra changer de GPU ou passer en QLoRA.
 
 ### Question matérielle pour les encadrants
+
 Pour la suite (runs >100 steps, scaling sur Qwen-7B, ajout d'un 2e env), est-ce qu'on peut viser un GPU plus gros — **A100 80 Go**, **H100**, voire **B200** si disponible ? L'A100 40 Go reste workable pour Qwen-3B mais limite vite l'horizon expérimental (notamment full fine-tuning et batch sizes plus grands pour stabiliser GRPO).
 
 ### Prochaines étapes (par ordre de priorité)
+
 1. **Run training de référence** (50-100 steps) sur A100, avec checkpoints réguliers.
 2. **Eval de contrôle** (subset 30 items) après training pour mesurer le delta vs Pass@1=18%.
 3. Si signal positif : **reward shaping plus fin** (pénaliser explicitement les boucles, valoriser les chemins de craft optimaux).
@@ -218,14 +240,16 @@ Mais **verl embarque sa propre version modifiée de vLLM** dans `verl/third_part
 
 **TRL = Transformer Reinforcement Learning**, par **Hugging Face**. Même but que verl (RL sur LLMs : PPO, DPO, GRPO, KTO…) mais philosophie inverse :
 
-| | TRL | verl |
-|---|---|---|
-| Cible | Prototype, single-process, single-GPU friendly | Cluster, scale |
-| Sharding | Via `accelerate` (FSDP, DeepSpeed) — optionnel | FSDP/Megatron — obligatoire |
-| Rollout | `transformers.generate` ou vLLM standard | vLLM forké, intégré profondément |
-| API | Pythonique, customizable, peu de YAML | Hydra YAML lourd |
-| Mainteneur | HF, très actif | ByteDance, actif mais moins ouvert |
-| Maturité multi-turn | Récent et expérimental (`rollout_func`) | Plus mature mais via AgentGym-RL |
+
+|                     | TRL                                            | verl                               |
+| ------------------- | ---------------------------------------------- | ---------------------------------- |
+| Cible               | Prototype, single-process, single-GPU friendly | Cluster, scale                     |
+| Sharding            | Via `accelerate` (FSDP, DeepSpeed) — optionnel | FSDP/Megatron — obligatoire        |
+| Rollout             | `transformers.generate` ou vLLM standard       | vLLM forké, intégré profondément   |
+| API                 | Pythonique, customizable, peu de YAML          | Hydra YAML lourd                   |
+| Mainteneur          | HF, très actif                                 | ByteDance, actif mais moins ouvert |
+| Maturité multi-turn | Récent et expérimental (`rollout_func`)        | Plus mature mais via AgentGym-RL   |
+
 
 → TRL c'est "easy mode", verl c'est "production mode". Pour 1 GPU et de la recherche flexible, TRL gagne.
 
@@ -251,14 +275,16 @@ Recoder GRPO from scratch est faisable en quelques jours. Le faire **sans bug nu
 
 Non, et c'est intentionnel. **Sans LoRA**, fine-tuner Qwen-3B en bf16 :
 
-| Composant | Mémoire |
-|---|---|
-| Poids du modèle (bf16) | ~6 Go |
-| Gradients (même dtype) | ~6 Go |
-| Optimizer Adam (m + v en fp32) | ~12 Go |
-| Activations (selon batch et seq_len) | 5-15 Go |
-| KV cache de vLLM pour le rollout | 5-10 Go |
-| **Total** | **~35-50 Go** |
+
+| Composant                            | Mémoire       |
+| ------------------------------------ | ------------- |
+| Poids du modèle (bf16)               | ~6 Go         |
+| Gradients (même dtype)               | ~6 Go         |
+| Optimizer Adam (m + v en fp32)       | ~12 Go        |
+| Activations (selon batch et seq_len) | 5-15 Go       |
+| KV cache de vLLM pour le rollout     | 5-10 Go       |
+| **Total**                            | **~35-50 Go** |
+
 
 → ne tient pas sur A100 40 Go avec en plus un rollout vLLM en parallèle.
 
