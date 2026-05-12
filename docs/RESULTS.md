@@ -152,27 +152,108 @@ moyenne. Un épisode 10-tours avec 1 action propre par tour a maintenant
 | Reward trajectory | oscillation modérée, plus de spikes 0.95 sur completions courtes |
 | Reward pour trajectoire qui réussit | +0.95 à +1.02 avec completions ~700-1300 tokens (vs ~95 tokens en v2) |
 
-**Résultat eval** : *en cours (T1, lancé 2026-05-12 ~10:30, ETA ~11:20)*.
+**Résultats eval** (commit `c7bf3ec`) :
 
-> *Note : cette section sera complétée dès que le worker T1 livre le Pass@1
-> v3 step50 et la matrice de confusion 4-way.*
+| Métrique | Valeur |
+|---:|---:|
+| Pass@1 test 100 | **8 / 100** (8 %) |
+| Δ vs baseline | **−10** |
+| Δ vs v2 step50 | **−6** |
+| `mean_rounds` | 27.8 |
+
+**Confusion 4-way** (baseline / v2-step10 / v2-step50 / v3-step50) :
+
+- 3 items résolus **uniquement** par v3 (`textcraft_1, 5, 8`) → gain
+  marginal sur un petit cluster d'items
+- 9 items résolus par v2-step50 mais ratés par v3 → grosse régression
+- 1 seul item gagné vs baseline (`textcraft_2`)
+
+**Smoking gun training** : à step 21, `completions/mean_length = 98.5`,
+reward = +1.02, `frac_reward_zero_std = 1.0`. Le pattern "1-tour gagne, sinon
+on raccourcit la réponse" est encore plus net qu'en v2. Le bonus `+0.02`
+sur `mean_n ≈ 1.0` continue à récompenser des **échecs courts bien formatés**
+(base reward = 0, shape = +0.02 → avantage positif à l'intérieur du
+groupe). Le `max_grad_norm=1.0` a bien tenu (max observé 19.2 vs spike
+1765 de v2), mais ça n'a pas suffi à compenser le signal vicié.
+
+**Verdict** : le shaping per-turn (v3) **n'a pas réparé v2**, il a aggravé
+le problème. Tout shaping non-sparse sur reward verifiable doit être
+banni — c'est le constat qui mène à v4.
 
 ---
 
-### (À venir) Exp 4 — GRPO v4 ScalingInter
+### Exp 4 — GRPO v4 ScalingInter (sparse reward, AgentGym-RL aligned)
 
-**Objectif** : reproduire le curriculum max_rounds du papier AgentGym-RL,
-mesurer le gain de la stratégie "court d'abord puis assouplir" vs le run
-v3 à max_rounds=20 fixe.
+**Objectif** : tester si combiner (a) le retour à la reward sparse 0/1
+(aligné papier, fix de v3) et (b) le curriculum `max_rounds` du papier
+permet d'au moins remonter au baseline.
 
-**Setup prévu** :
+**Modifications scientifiques vs v3** :
 
-- 4 paliers de `max_rounds` : 5 (steps 0-12), 10 (13-25), 15 (26-37), 20 (38-50)
-- Tout le reste identique à v3
-- Run name : `trl_grpo_v4_scalinginter_step50`
-- Baseline d'ablation `max_rounds=10` fixe à lancer en nuit pour comparaison séparée
+1. **Reward = `episode_reward` brut** (commit `30e580e fix(grpo):
+   align textcraft_reward with AgentGym-RL`). Suppression complète du
+   shaping `+0.02 / −0.05 / −0.01 × invalid_steps`. Le rollout continue
+   d'émettre `invalid_steps` et `mean_n_actions_per_turn` mais
+   uniquement pour les logs, plus dans le gradient.
+2. **Curriculum ScalingInter sur `max_rounds`** :
+   `5` (steps 0-12) → `10` (13-25) → `15` (26-37) → `20` (38-49).
 
-**Résultats** : *à compléter après T2.*
+**Setup spécifique** :
+
+| Élément | Valeur |
+|---|---|
+| Reward formula | `episode_reward` (sparse 0/1 only) |
+| `--max-rounds-schedule` | `5:0,10:13,15:26,20:38` |
+| Steps | 50 |
+| Init | Qwen-3B vanilla (pas continued depuis v3) |
+| Run name | `trl_grpo_v4_scalinginter_sparse_step50` |
+| Commit engineering | `0839679 chore(grpo): add --resume-from-checkpoint flag` |
+
+**Incident d'exécution** : à step 28/50, le serveur TextCraft (PID 5653) est
+mort tout seul → `ConnectionError` côté trainer → crash exit 1. Cause non
+identifiée (pas d'OOM, pas de signal externe trouvé dans `dmesg`).
+Resume propre depuis `checkpoint-25` via le flag engineering ajouté en
+`0839679`, le `current_max_rounds(trainer)` relit correctement
+`trainer.state.global_step` après resume, le curriculum a continué sa
+progression. Pas de perte de signal.
+
+**Diagnostic training** (50 steps complétés en deux runs concaténés) :
+
+| Métrique | Valeur |
+|---:|---:|
+| `train_runtime` cumulé | ~31 min (training partiel pre-crash + resume) |
+| `train_loss` final | 0.018 |
+| Premier `reward=1.0` observé | rollout batch #9 (après transition `max_rounds 5→10`) |
+| Rollouts avec ≥1 success | 3 batches sur ~50 enregistrés |
+| `completions/mean_length` au palier 5 | ~510 tokens |
+| `completions/mean_length` au palier 20 | ~1490 tokens (×3) |
+| `grad_norm` régime | 0 sur la majorité (sparse + N=2), pics ≤ 5 au palier 20 |
+| Distribution effective du curriculum | conforme au schedule (5/10/15/20 sur 13/13/12/12 steps) |
+
+**Résultats eval** (run name `v4_scalinginter_sparse_checkpoint-50`) :
+
+| Métrique | Valeur |
+|---:|---:|
+| Pass@1 test 100 | **14 / 100** (14 %) |
+| Δ vs baseline | **−4** |
+| Δ vs v3 step50 | **+6** |
+| `mean_rounds` | 27.1 |
+
+**Interprétation** :
+
+- **+6 vs v3** confirme empiriquement que le shaping `+0.02` était bien
+  le poison principal. Retirer le shaping rapproche immédiatement v4 du
+  régime baseline.
+- **−4 vs baseline** : ScalingInter + sparse reward + N=2 + LoRA n'est
+  pas suffisant pour battre Qwen-3B vanilla. Le signal d'apprentissage
+  reste trop sparse (cf. Insight #5 sur la borne mathématique à N=2).
+- Le `train_loss=0.018` non nul confirme que **du gradient a effectivement
+  circulé** au palier `max_rounds=20` (steps 38-50), mais l'amplitude
+  cumulée des updates n'a pas suffi à dépasser le baseline.
+- Lecture forte : sur notre régime hardware (single A100 40 Go), GRPO en
+  multi-tour avec reward sparse vérifiable est **borné supérieurement
+  par le baseline** ; pour réellement le dépasser il faut du compute
+  qui rapproche du papier (cf. §"Écart à la recette papier" en bas).
 
 ---
 
@@ -215,17 +296,22 @@ Pour chaque problème, parmi les 4 trajectoires :
 
 ---
 
-### Tableau récapitulatif (à compléter)
+### Tableau récapitulatif
 
 | Run | Steps | Train time | Pass@1 | Δ vs base | Commentaire |
 |---|---:|---:|---:|---:|---|
 | baseline | — | — | 18 / 100 | — | Qwen-3B vanilla |
 | v2-step10 | 10 | ~15 min | 18 / 100 | +0 | set d'items shifté, pas de gain net |
-| v2-step50 | 50 | ~67 min | 14 / 100 | **−4** | reward hacking, modèle apprend "1-shot or abandon" |
-| **v3-step50** | 50 | ~69 min | *en cours* | *en cours* | fix shaping per-turn |
-| v4-ScalingInter | 50 | *prévu* | *à mesurer* | *à mesurer* | curriculum 5→10→15→20 |
-| v4+envreward | 50+50 | *prévu* | *à mesurer* | *à mesurer* | continued GRPO standard |
-| v4+scporeward | 50+50 | *prévu* | *à mesurer* | *à mesurer* | continued GRPO avec vote SCPO |
+| v2-step50 | 50 | ~67 min | 14 / 100 | **−4** | reward hacking sur `count_actions` concaténé |
+| v3-step50 | 50 | ~69 min | **8 / 100** | **−10** | shaping per-turn, `+0.02` récompense les échecs courts |
+| **v4-ScalingInter-sparse** | 50 | ~31 min + resume | **14 / 100** | **−4** | sparse reward + curriculum, +6 vs v3 mais ne bat pas baseline |
+| v4+envreward (T3-A) | 50+50 | *abandonné* | — | — | dépendait de gain v4, voir Exp 5 |
+| v4+scporeward (T3-B) | 50+50 | *abandonné* | — | — | dépendait de gain v4, voir Exp 5 |
+
+**Reference du papier AgentGym-RL** (Table 2, Yang et al. 2026) :
+Qwen2.5-3B-Instruct + GRPO + full FT + N=8 + max_turns=30 constant → **Pass@1 = 75 / 100**.
+Notre meilleure expé (v4-ScalingInter-sparse) à 14/100, soit un écart
+de **−61 points** avec la recette du papier — voir §"Écart à la recette papier" ci-dessous.
 
 ---
 
@@ -251,4 +337,61 @@ Pour chaque problème, parmi les 4 trajectoires :
    avec petite batch et signal sparse (cas observé v2 step 35-36 après une
    variance de reward extrême). Ajout obligatoire de `max_grad_norm=1.0`
    depuis v3.
+
+5. **GRPO N=2 + reward sparse 0/1 est borné par la baseline en multi-tour
+   long-horizon**. La proba qu'un groupe de N=2 ait `std > 0` quand la
+   probabilité de succès individuelle vaut `p` est `2p(1−p)`. Sur la
+   baseline TextCraft (`p ≈ 0.18`), ça donne ~30 %. À `N=8`, cette même
+   probabilité monte à `1 − (1−p)^8 ≈ 80 %`. Notre setup laisse donc
+   70 % des steps sans signal de gradient utilisable, ce qui explique
+   structurellement pourquoi v4 plafonne autour du baseline malgré un
+   reward et un curriculum corrects.
+
+---
+
+### Écart à la recette du papier AgentGym-RL
+
+Comparaison ligne à ligne entre `examples/train/AgentGym-RL/textcraft_train.sh`
+(recette officielle du papier pour AgentGym-RL-3B) et notre
+`scratch/07_trl_grpo_textcraft_smoke.py` v4.
+
+| Paramètre | Papier | Nous (v4) | Origine de l'écart |
+|---|---|---|---|
+| Fine-tuning | Full FT (FSDP sharding via verl) | LoRA r=16 | contrainte 40 Go |
+| `max_turns` (rounds) | 30 constant (`rounds_ctrl.type=fixed`) | 20 max (ScalingInter 5→10→15→20) | choix d'implémentation |
+| `rollout.n` (N) | 8 trajectoires/query | 2 | contrainte 40 Go |
+| `train_batch_size` (queries/step) | 32 | 1 | contrainte 40 Go |
+| `ppo_mini_batch_size` | 8 | TRL default | différence framework TRL vs verl |
+| `ppo_inner_epochs` | 2 | TRL default 1 | id. |
+| `max_tokens` par génération | 512 | 128 (`max_completion_length`) | contrainte 40 Go |
+| `max_response_length` total | 10240 | 128 × max_turns ≈ 2560 | id. |
+| `kl_loss_coef` | 0.001 (`use_kl_loss=True`, `kl_loss_type=low_var_kl`) | TRL default `beta ≈ 0.04` | différence framework |
+| Reward | sparse env 0/1 | sparse env 0/1 (depuis commit `30e580e`) | **alignement OK** |
+| LR | 1e-6 | 1e-6 | **alignement OK** |
+| Temperature | 1.0 | 1.0 | **alignement OK** |
+| ScalingInter | absent pour le 3B | présent (notre v4) | on a ajouté un mécanisme du 7B au 3B |
+
+**Estimation mémoire de la recette papier** : 3B full FT + N=8 + bs=32 +
+max_response=10240 ≈ 130-180 Go (weights+optimizer ~30 Go, activations
++ KV cache rollout ~100-150 Go). Hardware paper : multi-noeud A100 ou
+H800 (cf. arXiv 2509.08755 Appendix E : *"NVIDIA A100 GPUs and Ascend
+910B NPUs […] distributed across multiple nodes"*, pas de comptage
+exact).
+
+**Sizing matériel pour répliquer AgentGym-RL-3B** :
+
+| Option | Mémoire totale | Faisable pour 3B (N=8, bs=32, max_resp=10k) |
+|---|---|---|
+| 1× A100 40 Go (notre setup) | 40 Go | ❌ infaisable |
+| 1× A100 80 Go | 80 Go | ⚠️ tight avec LoRA + N=4 max |
+| 1× B200 (192 Go) | 192 Go | ✅ confortable, full FT possible |
+| 4× A100 80 Go | 320 Go | ✅ confortable |
+| 8× A100 80 Go (likely paper setup) | 640 Go | ✅✅ |
+
+**Conséquence pour la suite** : continuer à itérer sur le reward ou les
+hyperparams dans notre régime actuel ne nous fera pas franchir le
+baseline ; la mathématique de GRPO à N=2 le borne. Pour vraiment
+mesurer la valeur de méthodologies type ScalingInter / SCPO / West-of-N
+sur TextCraft, il faudra d'abord obtenir une machine qui permette N ≥ 4
+et idéalement la recette papier complète.
 
