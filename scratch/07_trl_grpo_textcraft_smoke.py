@@ -21,8 +21,39 @@ TRAIN_PATH = REPO_ROOT / "AgentEval" / "train" / "textcraft_train.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 
 SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-MAX_SIM_ROUNDS = 20
+MAX_SIM_ROUNDS = 20  # default cap when no curriculum is given
 ITEM_TAG_RE = re.compile(r"^<ITEM_IDX:(\d+)>$")
+
+# ScalingInter curriculum: list of (step_threshold, max_rounds) sorted by step.
+# Populated from --max-rounds-schedule (e.g. "5:0,10:13,15:26,20:38" for the
+# 4-step curriculum from AgentGym-RL). None means "use MAX_SIM_ROUNDS constant".
+MAX_ROUNDS_SCHEDULE: list[tuple[int, int]] | None = None
+
+
+def parse_max_rounds_schedule(spec: str) -> list[tuple[int, int]]:
+    """Parse e.g. '5:0,10:13,15:26,20:38' into [(0,5),(13,10),(26,15),(38,20)]."""
+    parts = [p.strip() for p in spec.split(",") if p.strip()]
+    out: list[tuple[int, int]] = []
+    for p in parts:
+        rounds_str, step_str = p.split(":")
+        out.append((int(step_str), int(rounds_str)))
+    out.sort(key=lambda x: x[0])
+    return out
+
+
+def current_max_rounds(trainer: Any) -> int:
+    """Resolve the active max_rounds cap given the trainer's global step."""
+    if MAX_ROUNDS_SCHEDULE is None:
+        return MAX_SIM_ROUNDS
+    step = 0
+    state = getattr(trainer, "state", None)
+    if state is not None:
+        step = int(getattr(state, "global_step", 0) or 0)
+    cap = MAX_SIM_ROUNDS
+    for thr_step, thr_rounds in MAX_ROUNDS_SCHEDULE:
+        if step >= thr_step:
+            cap = thr_rounds
+    return cap
 
 
 def item_id_to_idx(item_id: str) -> int:
@@ -128,7 +159,11 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
     completion_ids_out: list[list[int]] = [[] for _ in range(n)]
     logprobs_out: list[list[float]] = [[] for _ in range(n)]
 
-    for round_idx in range(MAX_SIM_ROUNDS):
+    cap = current_max_rounds(trainer)
+    if MAX_ROUNDS_SCHEDULE is not None:
+        step = int(getattr(getattr(trainer, "state", None), "global_step", 0) or 0)
+        print(f"[scaling-inter] step={step} max_rounds={cap}", flush=True)
+    for round_idx in range(cap):
         active = [i for i in range(n) if not done[i]]
         if not active:
             break
@@ -264,7 +299,22 @@ def main() -> None:
     parser.add_argument("--max-steps", type=int, default=1)
     parser.add_argument("--num-generations", type=int, default=2)
     parser.add_argument("--run-name", type=str, default="trl_grpo_textcraft_smoke")
+    parser.add_argument(
+        "--max-rounds-schedule",
+        type=str,
+        default="",
+        help=(
+            "ScalingInter curriculum, e.g. '5:0,10:13,15:26,20:38' means: "
+            "max_rounds=5 from step 0, =10 from step 13, =15 from step 26, "
+            "=20 from step 38. Empty string keeps the fixed MAX_SIM_ROUNDS cap."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.max_rounds_schedule:
+        global MAX_ROUNDS_SCHEDULE
+        MAX_ROUNDS_SCHEDULE = parse_max_rounds_schedule(args.max_rounds_schedule)
+        print(f"[scaling-inter] schedule = {MAX_ROUNDS_SCHEDULE}", flush=True)
 
     check_server()
     rows = build_prompt_rows(max_items=args.max_items)
