@@ -1,0 +1,46 @@
+[load] baseline  : 100 items from /home/v.lagresle/rl-gym-workout/scratch/eval_logs
+[load] step10_v2 : 100 items from /home/v.lagresle/rl-gym-workout/scratch/eval_logs_step10
+[load] step50_v2 : 100 items from /home/v.lagresle/rl-gym-workout/scratch/eval_logs_step50
+[load] step50_v3 : 100 items from /home/v.lagresle/rl-gym-workout/scratch/eval_logs_step50_v3
+
+[common] 100 item_ids present in all 4 variants
+
+============================================================
+PASS@1 ON COMMON SET (n=100)
+============================================================
+variant      |  pass |   rate | mean rounds
+------------------------------------------------------------
+baseline     |    18 |  18.0% | 25.9
+step10_v2    |    18 |  18.0% | 25.7
+step50_v2    |    14 |  14.0% | 26.6
+step50_v3    |     8 |   8.0% | 27.8
+
+============================================================
+4-WAY CONFUSION (B, S10, S50_v2, S50_v3)
+============================================================
+(B, S10, v2, v3)         | count | items (truncated)
+------------------------------------------------------------
+(T, T, T, T)             |     2 | textcraft_24, textcraft_25
+(T, F, T, T)             |     2 | textcraft_13, textcraft_23
+(T, T, F, T)             |     2 | textcraft_1, textcraft_5
+(T, T, T, F)             |     2 | textcraft_0, textcraft_3
+(F, F, T, T)             |     1 | textcraft_2
+(F, T, T, F)             |     3 | textcraft_11, textcraft_12, textcraft_21
+(T, F, T, F)             |     2 | textcraft_15, textcraft_29
+(T, T, F, F)             |     4 | textcraft_14, textcraft_152, textcraft_17, textcraft_18
+(F, F, F, T)             |     1 | textcraft_8
+(F, F, T, F)             |     2 | textcraft_435, textcraft_7
+(F, T, F, F)             |     5 | textcraft_10, textcraft_174, textcraft_22, textcraft_26...
+(T, F, F, F)             |     4 | textcraft_142, textcraft_145, textcraft_156, textcraft_158
+(F, F, F, F)             |    70 | textcraft_140, textcraft_141, textcraft_143, textcraft_144...
+
+============================================================
+DELTAS
+============================================================
+  Resolved by v3 only (not v2)        : 3  (['textcraft_1', 'textcraft_5', 'textcraft_8'])
+  Resolved by v2 only (not v3)        : 9  (['textcraft_0', 'textcraft_11', 'textcraft_12', 'textcraft_15', 'textcraft_21', 'textcraft_29', 'textcraft_3', 'textcraft_435', 'textcraft_7'])
+  Resolved by both v2 and v3          : 5
+  Resolved by baseline                : 18
+  Resolved by v3                      : 8
+  Net shift v3 vs v2                  : -6
+  Net shift v3 vs baseline            : -10

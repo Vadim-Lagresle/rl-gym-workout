@@ -661,3 +661,156 @@ training a renforcé le reward hacking "1-tour ou rien" sans converger vers
 une stratégie multi-tour gagnante. Prochaine étape obligatoire : fixer le
 shaping (note méthodo §1) avant de relancer un run plus long.**
 
+## Run GRPO v3 — résultats (2026-05-12)
+
+Deuxième run "long" (50 steps), même setup que v2 sauf **fix du reward
+shaping** (note méthodo §1) : `n_actions` est désormais comptée **par tour
+d'assistant** dans `rollout_func` et le shaping +0.02 / −0.05 est appliqué
+sur la moyenne par tour, plus sur la concaténation de toute la completion.
+Reste identique : N=2, LoRA r=16, max_completion=128, MAX_SIM_ROUNDS=20,
+256 items, `max_grad_norm=1.0` (clip explicite ajouté en réaction au spike
+1765 de v2).
+
+Eval LoRA step50 v3 lancée hier soir avait été interrompue à 9/100 ;
+reprise ce matin en mode resume (cache détecté, 91 items neufs en
+~39 min sur 1×A100 40 Go). Serveur TextCraft relancé sur 127.0.0.1:36005
+au préalable.
+
+### Tableau Pass@1 4-way (n=100, intersection complète)
+
+| variante     | Pass@1   | mean rounds | delta vs base | delta vs v2 |
+|--------------|---------:|------------:|--------------:|------------:|
+| baseline     | 18/100   | 25.9        | —             | —           |
+| LoRA step10  | 18/100   | 25.7        | **+0**        | —           |
+| LoRA step50 v2 | 14/100 | 26.6        | **−4**        | —           |
+| LoRA step50 v3 | **8/100** | 27.8     | **−10**       | **−6**      |
+
+### Confusion 4-way (B, S10, v2, v3)
+
+Buckets non vides triés par "succès cumulés" :
+
+| (B, S10, v2, v3) | count |
+|:----------------:|------:|
+| (T, T, T, T)     | 2     |
+| (T, F, T, T)     | 2     |
+| (T, T, F, T)     | 2     |
+| (T, T, T, F)     | 2     |
+| (F, F, T, T)     | 1     |
+| (F, T, T, F)     | 3     |
+| (T, F, T, F)     | 2     |
+| (T, T, F, F)     | 4     |
+| (F, F, F, T)     | 1     |
+| (F, F, T, F)     | 2     |
+| (F, T, F, F)     | 5     |
+| (T, F, F, F)     | 4     |
+| (F, F, F, F)     | 70    |
+
+Lectures clés :
+- Résolus par v3 uniquement (gagnés par v3 et perdus par v2) : **3** items
+  (`textcraft_1`, `textcraft_5`, `textcraft_8`).
+- Résolus par v2 uniquement (perdus par v3) : **9** items
+  (`textcraft_0`, `textcraft_3`, `textcraft_7`, `textcraft_11`,
+  `textcraft_12`, `textcraft_15`, `textcraft_21`, `textcraft_29`,
+  `textcraft_435`).
+- Résolus par v2 **et** v3 : 5.
+- Résolus par v3 mais pas par baseline : 1 (`textcraft_2`).
+- Net shift v3 vs v2 : **−6**. v3 perd plus d'items qu'il n'en gagne.
+- 70 items "noyau dur" perdus par les 4 variantes (probablement
+  "vraiment difficiles" ou mauvaise nomenclature serveur).
+
+### Comparaison training v3 vs v2
+
+Source : `saves/trl_grpo/trl_grpo_rolloutfunc_v3_step50/checkpoint-50/trainer_state.json`
+(le terminal log du training v3 a tourné dans une session précédente et
+n'est plus dans `terminals/` ; les métriques fines `mean_n_actions_per_turn`
+ne sont donc pas extraites côté trainer state — limitation honnête).
+
+#### Reward trajectory (`rewards/textcraft_reward/mean`, 25 rollouts)
+
+| step | reward  | step | reward  | step | reward  | step | reward  | step | reward  |
+|-----:|--------:|-----:|--------:|-----:|--------:|-----:|--------:|-----:|--------:|
+| 1    | −0.120  | 11   | −0.125  | 21   | **+1.020** | 31 | −0.150  | 41   | −0.105  |
+| 3    | −0.185  | 13   | −0.215  | 23   | +0.420  | 33   | +0.480  | 43   | −0.115  |
+| 5    | −0.110  | 15   | +0.395  | 25   | −0.125  | 35   | −0.105  | 45   | −0.125  |
+| 7    | −0.145  | 17   | −0.105  | 27   | −0.105  | 37   | −0.150  | 47   | −0.110  |
+| 9    | −0.160  | 19   | −0.120  | 29   | −0.165  | 39   | −0.135  | 49   | +0.415  |
+
+- Premiers 5 (1–9) : moyenne **−0.144** (vs v2 : −0.21, donc démarrage
+  légèrement moins défavorable).
+- Milieu 5 (21–29) : moyenne **+0.209** (vs v2 : +0.23, à peu près identique,
+  tiré par le spike step 21).
+- Derniers 5 (41–49) : moyenne **−0.008** (vs v2 : −0.19, donc fin nettement
+  moins négative).
+
+5/25 batches avec reward > 0 (vs 4/25 en v2). Trajectoire toujours
+**oscillante, pas d'apprentissage net**, mais moins négative que v2 en fin
+de run.
+
+#### Pattern "completion courte → reward élevé" : a-t-il disparu ?
+
+**Non.** Smoking gun : **step 21**, `completions/mean_length = 98.5`
+(min 98, max 99), reward = **+1.02**, `frac_reward_zero_std = 1.0` (les 2
+rollouts ont produit exactement la même réponse ultra-courte et ont
+résolu le problème). C'est la signature comportementale du mode "1-tour
+ou rien" identifiée sur v2. Idem step 23 (min 152), step 33 (min 102),
+step 49 (min 599) : à chaque fois qu'un batch contient au moins un
+rollout court qui gagne, le reward du batch monte. Les 20 batches avec
+completions ~1000–1600 tokens restent tous négatifs (reward ≈ −0.11 à
+−0.22).
+
+Le fix de shaping n'a donc **pas supprimé l'incitation à gagner en 1 tour** :
+il a juste retiré le malus pour les épisodes multi-tour, mais le bonus du
+gain reste tellement plus gros que le coût d'un tour long que la politique
+préfère toujours tenter court.
+
+#### `completions/mean_length` v3
+
+- Moyenne sur les 25 rollouts : **≈ 1148 tokens** (similaire à v2).
+- Min : **98** (step 21, suspect), max : **2560** (step 3, clip).
+- Range typique sans outliers : 977–1649 tokens. Distribution un peu plus
+  resserrée que v2 (variance des moyennes plus faible), mais avec les
+  mêmes effondrements occasionnels vers les completions courtes.
+
+#### `grad_norm` v3
+
+- Range : 0.0 (steps 21–22, frac_reward_zero_std=1, advantage nul) à
+  **19.19** (step 28, max).
+- Médiane ≈ 1.5, P95 ≈ 8.
+- **Aucun spike pathologique** comparable au 1765 observé sur v2/step 35–36 :
+  le `max_grad_norm=1.0` ajouté en réaction joue son rôle. Le pic step 28
+  reste contenu et n'a pas dégénéré.
+
+Verdict training : **stabilité numérique propre, optimisation visible mais
+non productive.** Le clip protège, mais le signal de reward conduit vers
+le même attracteur que v2 — résultat empirique : Pass@1 baisse encore.
+
+### Verdict honnête
+
+**Le fix de shaping n'a pas amélioré le Pass@1 ; il l'a au contraire
+dégradé** (8/100 vs 14/100 sur v2, soit −6 absolus, −10 vs baseline).
+Le reward hacking "1-tour ou rien" n'a pas disparu — il est même plus
+visible dans le training v3 (step 21 : completion de 98 tokens avec
+reward +1.02 et écart-type nul, ce qui n'apparaissait pas aussi
+proprement sur v2). Le malus multi-tour retiré ne suffit pas : tant que
+le bonus de gain en 1 tour reste structurellement plus grand que le coût
+d'un long épisode, la politique préfère parier court. Les mean rounds
+montent légèrement (27.8 vs 26.6) mais sans gain : v3 essaie un peu plus
+de multi-tour, échoue plus souvent, et ne réussit pas plus.
+
+**Recommandation pour la suite** : ne pas continuer GRPO sur ce shaping.
+Deux options à explorer avant de relancer un run :
+
+1. **Refonte du reward signal** : (a) plancher du shaping bien plus négatif
+   sur les rollouts courts non aboutis pour casser le pari "1-tour ou
+   rien", (b) bonus par tour utile (action qui change l'inventaire) plutôt
+   que bonus de format. Coût zéro, peut être testé en 1 step10.
+2. **Levier 4.b du WORKLOG** : post-processing rule-based de l'action côté
+   client. Absorbe les erreurs de format pures (60–70 % attendu) et ne
+   touche pas au RL. Si le baseline + post-processing dépasse déjà 18/100,
+   on a une meilleure base de départ pour le RL.
+
+**À éviter à coût égal** : monter N à 4 (déjà identifié comme prio §2,
+mais le problème actuel n'est pas la variance de l'avantage — c'est le
+signal de reward lui-même qui est mal aligné). Inutile d'investir du GPU
+sur un signal cassé.
+
