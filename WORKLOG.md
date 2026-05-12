@@ -1170,3 +1170,63 @@ garantie.
 Détails dans [`docs/RESULTS.md`](docs/RESULTS.md) §"Audit verl + smoke
 tests (préalable à la migration 8× A100)".
 
+### Checklist de reprise sur la VM 8× A100 40 Go
+
+À faire à la prochaine session, dans cet ordre :
+
+1. **Sanity checks de la nouvelle VM**
+   ```bash
+   nvidia-smi             # doit montrer 8 GPUs, 40 Go chacun
+   df -h ~                # disque (100 Go) toujours plein de ce qu'on avait
+   curl -I https://gitlab.crto.in:8443   # tunnel GitLab OK (HTTP/2 302)
+   git -C ~/rl-gym-workout status        # branche main, working tree clean
+   ```
+
+2. **Réveiller le serveur TextCraft** (en arrière-plan, persistant)
+   ```bash
+   source ~/miniconda3/etc/profile.d/conda.sh
+   conda activate agentenv-textcraft
+   cd ~/rl-gym-workout/AgentGym/agentenv-textcraft
+   nohup setsid textcraft --host 127.0.0.1 --port 36005 \
+       > /tmp/textcraft.log 2>&1 < /dev/null &
+   sleep 3
+   curl -sS -X POST http://127.0.0.1:36005/create -H 'content-type: application/json' -d '{}'
+   ```
+
+3. **Replay rapide du smoke (a) pour valider l'env conda** (~12 s, CPU)
+   ```bash
+   conda activate agentgym-rl
+   cd ~/rl-gym-workout
+   python scratch/smoke_verl_test.py   # doit afficher 3 PASS
+   ```
+
+4. **Replay du smoke (b) sur 8 GPUs** = première vraie validation matérielle
+   - Modifier `examples/eval/textcraft_eval.local.sh` :
+     `trainer.n_gpus_per_node=8`, `rollout.tensor_model_parallel_size=8`,
+     `rollout.gpu_memory_utilization=0.65`.
+   - Run sur 100 items eval. ETA ~5 min (8 GPUs, vLLM TP=8).
+   - Si Pass@1 ≈ 14/100 → on retrouve notre baseline. ✅ → étape 5.
+   - Sinon → debug NCCL/vLLM TP avant de lancer le training.
+
+5. **Lancer le training papier-exact** via `examples/train/AgentGym-RL/textcraft_train.sh`
+   avec, en plus des overrides du script (cf. l'analyse §"Écart à la recette papier" dans RESULTS.md) :
+   - `trainer.n_gpus_per_node=8`, `trainer.nnodes=1`
+   - `actor_rollout_ref.rollout.tensor_model_parallel_size=8`
+   - `actor_rollout_ref.rollout.gpu_memory_utilization=0.65` (40 Go vs 80 Go)
+   - `data.max_response_length=8192` (down de 10240, gain mémoire ~20 %)
+   - Tout le reste du `textcraft_train.sh` reste intact (N=8, bs=32,
+     full FT FSDP, kl_coef=0.001, rounds=30, lr=1e-6, ~120 steps).
+
+6. **Monitoring training**
+   - Tail `train_*/grpo_actor.log` pour `train/loss`, `train/reward_mean`,
+     `train/grad_norm`.
+   - Sur 8× A100 40 Go avec recette papier complète, ETA training : 6-12 h
+     (à confirmer après les 5 premiers steps).
+
+7. **Eval finale** sur 100 items test, comparaison Pass@1 vs paper 75/100.
+   Documenter dans `docs/RESULTS.md` §"Exp 6 — Réplication papier 8× A100".
+
+Si tu reviens et que tu vois ce message en relisant le worklog : tu peux
+me demander directement *"on reprend la checklist 8× A100, étape 1"*, je
+saurai où on en est sans devoir tout redécouvrir.
+
