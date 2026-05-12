@@ -386,27 +386,21 @@ def textcraft_env_reward(
     mean_n_actions_per_turn: list[float],
     **kwargs: Any,
 ) -> list[float]:
-    """v3 reward (same as 07_*): verifiable env signal + light shaping."""
-    rewards: list[float] = []
-    debug_rows: list[str] = []
-    for comp, base_rew, bad_steps, mean_n in zip(
-        completions, episode_reward, invalid_steps, mean_n_actions_per_turn, strict=True
-    ):
-        r = float(base_rew)
-        if 0.9 <= mean_n <= 1.1:
-            shape = 0.02
-        elif mean_n > 1.5 or mean_n < 0.5:
-            shape = -0.05
-        else:
-            shape = 0.0
-        r += shape
-        r -= 0.01 * float(bad_steps)
-        rewards.append(r)
-        debug_rows.append(
-            f"base={base_rew:+.3f} mean_n={mean_n:.2f} shape={shape:+.3f} "
-            f"bad={bad_steps} -> r={r:+.3f}"
-        )
-    print("[reward-env] " + " | ".join(debug_rows), flush=True)
+    """Sparse outcome reward only (matches AgentGym-RL TextCraft training recipe).
+
+    Removes the v2/v3 shaping that empirically degraded Pass@1 (18 -> 14 -> 8 over
+    baseline -> v2 -> v3). AgentGym-RL uses only the env 0/1 scalar at episode end,
+    KL handled in the loss via use_kl_loss. See worker investigation 2026-05-12.
+
+    invalid_steps and mean_n_actions_per_turn are kept in the signature only so
+    rollout_func's return dict matches; they are NOT used to reshape the reward.
+    """
+    rewards = [float(r) for r in episode_reward]
+    debug = " | ".join(
+        f"r={r:+.3f} mean_n={mn:.2f} bad={bs}"
+        for r, mn, bs in zip(rewards, mean_n_actions_per_turn, invalid_steps)
+    )
+    print(f"[reward-env] sparse outcome | {debug}", flush=True)
     return rewards
 
 

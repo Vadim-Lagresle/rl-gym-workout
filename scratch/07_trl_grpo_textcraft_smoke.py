@@ -259,37 +259,21 @@ def textcraft_reward(
     mean_n_actions_per_turn: list[float],
     **kwargs: Any,
 ) -> list[float]:
-    """Reward shaping at the **per-assistant-message** granularity.
+    """Sparse outcome reward only (matches AgentGym-RL TextCraft training recipe).
 
-    Fixes the v2 bug (WORKLOG §1, 2026-05-11): previously we counted actions on
-    the *concatenated* completion (all turns glued together), which penalized
-    every multi-turn episode. The intended signal is "1 action per assistant
-    message", which only the rollout function can compute.
+    Removes the v2/v3 shaping that empirically degraded Pass@1 (18 -> 14 -> 8 over
+    baseline -> v2 -> v3). AgentGym-RL uses only the env 0/1 scalar at episode end,
+    KL handled in the loss via use_kl_loss. See worker investigation 2026-05-12.
+
+    invalid_steps and mean_n_actions_per_turn are kept in the signature only so
+    rollout_func's return dict matches; they are NOT used to reshape the reward.
     """
-    rewards: list[float] = []
-    debug_rows: list[str] = []
-
-    for comp, base_rew, bad_steps, mean_n in zip(
-        completions, episode_reward, invalid_steps, mean_n_actions_per_turn, strict=True
-    ):
-        r = float(base_rew)
-        # Bonus only for the tight target zone (well-formed single-action turns).
-        if 0.9 <= mean_n <= 1.1:
-            shape = 0.02
-        elif mean_n > 1.5 or mean_n < 0.5:
-            shape = -0.05
-        else:
-            # Soft neutral zone (0.5..0.9 or 1.1..1.5): no bonus, no malus.
-            shape = 0.0
-        r += shape
-        r -= 0.01 * float(bad_steps)
-        rewards.append(r)
-        debug_rows.append(
-            f"base={base_rew:+.3f} mean_n={mean_n:.2f} shape={shape:+.3f} "
-            f"bad={bad_steps} -> r={r:+.3f}"
-        )
-
-    print("[reward] " + " | ".join(debug_rows), flush=True)
+    rewards = [float(r) for r in episode_reward]
+    debug = " | ".join(
+        f"r={r:+.3f} mean_n={mn:.2f} bad={bs}"
+        for r, mn, bs in zip(rewards, mean_n_actions_per_turn, invalid_steps)
+    )
+    print(f"[reward] sparse outcome | {debug}", flush=True)
     return rewards
 
 
