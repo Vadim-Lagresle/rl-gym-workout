@@ -814,3 +814,359 @@ mais le problème actuel n'est pas la variance de l'avantage — c'est le
 signal de reward lui-même qui est mal aligné). Inutile d'investir du GPU
 sur un signal cassé.
 
+## Note méthodo §2 — Implémenter du CoT long-form / self-verification sur TextCraft (rédaction 2026-05-12)
+
+### Contexte
+
+AgentGym-RL utilise du ReAct "shallow" : `<think>` court (50-200 tokens),
+pas de self-verification, pas de backtracking. C'est volontaire (cf.
+discussion lecture papier — argument marketing : "no need for explicit
+long-reasoning"). Reasoning models style R1 / QwQ / o1 / Qwen3-thinking
+font l'inverse : `<think>` long (1000-30000+ tokens), self-checking
+émergent, backtracking, exploration de branches.
+
+**Question pratique** : sur Qwen2.5-3B-Instruct + TextCraft, est-ce qu'on
+peut récupérer une partie de ces gains, et à quel coût ?
+
+**Constat préalable** : TextCraft est un environnement de **planification**,
+pas de raisonnement profond. Pas de fact-checking à faire, pas d'ambiguïté
+inférentielle. La difficulté est l'**arbre de dépendances de craft**
+(profondeur 1 à 4) à dérouler dans le bon ordre, en gérant l'inventaire
+et les substitutions d'ingrédients génériques. Donc :
+- **Long CoT planning au début d'épisode** : potentiellement très utile
+  (pré-construire l'arbre de craft inversé en 200-500 tokens).
+- **Self-verification après chaque action** : limitée — pas grand-chose à
+  vérifier autre que l'inventory check qui existe déjà comme action.
+- **Backtracking** : utile quand le modèle réalise qu'il manque un
+  ingrédient ou qu'une recette ne s'applique pas.
+
+Conclusion : on n'a pas besoin de toute la machinerie R1. Un long-form
+**planning structuré au tour 1**, puis ReAct shallow ensuite, devrait
+capturer 80 % des gains attendus.
+
+### 4 niveaux d'effort possibles
+
+#### Niveau 1 — Prompt engineering (effort : 1 h, risque : nul)
+
+Principe : modifier le system prompt TextCraft pour forcer un plan
+structuré au début, avec format dédié.
+
+Implémentation concrète :
+
+```
+You are given crafting recipes to craft items in Minecraft.
+
+Before your first action, you MUST output a complete crafting plan in this
+exact format:
+
+<plan>
+Goal: <target item>
+Recipe tree (in execution order):
+  1. craft <intermediate_1> using <inputs_1>
+  2. craft <intermediate_2> using <inputs_2>
+  ...
+  N. craft <goal> using <inputs_N>
+Raw materials needed: <list from environment>
+</plan>
+
+Then execute the plan one step at a time. After each successful step,
+output:
+<check>step <i> done, inventory now contains <items></check>
+
+If a step fails, output:
+<replan>reason: ..., new plan: ...</replan>
+and emit a new <plan>...</plan>.
+
+Use the format:
+Thought: <short reasoning>
+Action: <one of: get X | inventory | craft X using Y>
+```
+
+Touches :
+- `scratch/03_eval_qwen.py` → ajouter `SYSTEM_PROMPT_V2` constant et un
+  flag `USE_LONG_COT` lu depuis env var.
+- Rien à toucher côté serveur TextCraft (le shape des actions reste le
+  même : `get` / `inventory` / `craft`).
+
+Coût compute : zéro entraînement, juste rallonger un peu les rollouts en
+inférence (~+300 tokens par épisode en moyenne).
+
+Gain attendu : **+5 à +15 points Pass@1** sur baseline 18/100. Le modèle
+Qwen-3B-Instruct devrait imiter le format spontanément vu qu'il est
+instruct-tuned. Les depth 1 et 2 ne devraient pas régresser (tâches
+triviales), les gains viendraient principalement de depth 3-4 où la
+pré-planification absorbe les erreurs de séquencage.
+
+Signal à observer pour valider :
+- `mean_rounds` baisse (les épisodes échouent moins par dérive multi-tour).
+- Distribution `completion_length` bi-modale (tour 1 long ~500 tokens,
+  tours suivants courts ~80 tokens).
+- Pass@1 sur depth 3-4 spécifiquement (extraire la profondeur du dataset
+  côté serveur — à vérifier si exposée dans l'observation).
+
+Risque : Qwen-3B-Instruct peut ne pas suivre le format strictement
+(plans incomplets, replanning manqué). À mitiger par 1-2 few-shot examples
+inline dans le system prompt.
+
+**Décision** : à tester en priorité avant tout RL supplémentaire. Coût
+zéro, baseline mieux placée si gain.
+
+#### Niveau 2 — Reward shaping pendant le RL (effort : 1-2 j, risque : moyen)
+
+Principe : reprendre v3 du run GRPO et ajouter des composantes au reward
+qui encouragent le format long-CoT défini en Niveau 1.
+
+Implémentation concrète :
+
+```python
+# Dans rollout_func.compute_reward(completion, observation, ...)
+
+def textcraft_reward_v4(completion, env_reward, ...):
+    base = env_reward  # 0 ou 1 du serveur
+
+    # Bonus format plan complet au tour 1
+    has_plan = re.search(r"<plan>.*</plan>", completion[:2000], re.DOTALL)
+    plan_bonus = 0.1 if has_plan else 0.0
+
+    # Bonus : le plan mentionne tous les sub-items de l'arbre
+    if has_plan:
+        plan_text = has_plan.group()
+        n_subgoals_mentioned = count_subgoals_in_plan(plan_text)
+        plan_quality_bonus = min(0.05 * n_subgoals_mentioned, 0.15)
+    else:
+        plan_quality_bonus = 0.0
+
+    # Pénalité format error (action mal formée)
+    n_format_errors = count_format_errors(completion)
+    format_penalty = -0.05 * n_format_errors
+
+    # Pénalité "1-tour ou rien" (déjà v3) : retirée, on encourage plutôt
+    # le multi-tour structuré via les bonus ci-dessus
+
+    return base + plan_bonus + plan_quality_bonus + format_penalty
+```
+
+Touches :
+- `AgentGym-RL/verl/utils/agentgym/rollout_func.py` ou équivalent
+  (selon le wrapper actuel) → nouvelle fonction `compute_reward_v4`.
+- Hyperparam `reward_version=v4` à ajouter au config YAML.
+
+Coût compute : un run GRPO de 50 steps comme v2/v3, donc même ordre
+de grandeur (~3 h sur A100 40 Go avec LoRA).
+
+Gain attendu : si Niveau 1 marche déjà bien, Niveau 2 devrait
+**consolider et étendre** : le modèle apprend à produire le format
+**fiablement** (pas juste quand le prompt l'exige bien), et peut le
+généraliser à des tâches difficiles où il aurait dévié sinon.
+
+Risque principal : **reward hacking sur la longueur du plan**. Le modèle
+peut spammer des steps inutiles dans `<plan>` pour grappiller le bonus.
+À mitiger par :
+- Cap dur sur la longueur du `<plan>` (genre `min(0.05 * n, 0.15)`).
+- Bonus conditionné à la **présence ultérieure** de chaque sub-goal dans
+  les actions effectives (sinon le plan est juste du décor).
+
+Signal à observer :
+- Évolution de `frac_with_plan` au cours des steps (devrait monter de
+  ~20-40 % à 80-95 %).
+- Pas de divergence : `completions/mean_length` doit rester < 1500
+  tokens par épisode (sinon reward hacking sur longueur).
+- Pass@1 step50 > Pass@1 step10 (= preuve que le RL apprend réellement,
+  contrairement à v2/v3 où on a régression).
+
+**Décision** : si Niveau 1 valide >+5 pts, lancer Niveau 2. Sinon, le
+signal est trop faible, retravailler le system prompt d'abord.
+
+#### Niveau 3 — Cold-start SFT puis RL (effort : 1 semaine, risque : faible)
+
+Principe : générer un dataset de trajectoires TextCraft avec long-CoT
+produites par un gros modèle, SFT Qwen-3B dessus, puis RL.
+
+Implémentation concrète :
+
+1. **Génération du dataset SFT** :
+   - 200-500 tâches TextCraft (depth 1-4 stratifié).
+   - Solveur : Claude-3.7-Sonnet avec thinking activé, ou GPT-5 thinking,
+     ou DeepSeek-R1 via API. Coût estimé : ~$50-100.
+   - Format imposé : `<plan>...</plan>` puis `Thought: / Action:` à chaque
+     tour, avec `<check>` à la fin de chaque step réussie.
+   - Filtrage : ne garder que les trajectoires qui résolvent l'épisode
+     (env_reward = 1). Probablement ~70-80 % des trajectoires retenues
+     vu la simplicité de TextCraft pour ces modèles.
+
+2. **SFT Qwen-3B-Instruct** :
+   - 1-2 epochs sur ces 200-500 trajectoires.
+   - LR 1e-5, batch 4, gradient accumulation 4.
+   - Loss masking : ne calculer la loss que sur les tokens de l'assistant
+     (`<plan>`, `Thought:`, `Action:`, `<check>`). Les `Observation:`
+     du serveur sont masquées.
+   - Sortie : `models/Qwen2.5-3B-textcraft-cot-sft/`.
+   - Coût compute : ~1-2 h sur A100 40 Go.
+
+3. **RL par-dessus** :
+   - Reprendre GRPO v3, mais en partant du checkpoint SFT au lieu du
+     vanilla instruct.
+   - Reward identique au v3 (ou v4 du Niveau 2).
+   - 50-100 steps.
+
+Touches :
+- Nouveau script `scratch/04_generate_cot_trajectories.py` qui pilote
+  l'API Claude/GPT/R1 sur les tâches TextCraft via le serveur local.
+- Nouveau script `scratch/05_sft_textcraft.py` (TRL `SFTTrainer` avec
+  masking).
+- Reprise de la pipeline RL existante avec `model.path = saves/sft/...`.
+
+Gain attendu : **+15 à +30 pts Pass@1** sur baseline si tout converge.
+C'est l'approche la plus "puissante" mais aussi celle où on perd la
+lisibilité scientifique : on ne sait plus si les gains viennent du
+prompt, du SFT, ou du RL.
+
+Risque : **distribution shift entre SFT et RL** (le modèle apprend des
+patterns que le serveur réel ne récompense pas exactement de la même
+façon que le solveur expert). Atténuable en générant les trajectoires
+SFT **avec le vrai serveur TextCraft local** (pas via simulation).
+
+**Décision** : à faire uniquement si Niveaux 1 et 2 plafonnent. Ordre
+de grandeur de gain probablement marginal vs Niveau 2 sur TextCraft
+spécifiquement (rendements décroissants), mais investissement
+intéressant si on veut publier ou généraliser à d'autres envs.
+
+#### Niveau 4 — Vraie self-verification émergente via RL pur (effort : plusieurs semaines, risque : élevé)
+
+Principe : laisser émerger les comportements R1-like (self-check,
+backtracking) via RL avec rewards bien calibrés, à la R1-Zero.
+
+Évaluation : **probablement overkill pour TextCraft seul**. Les
+comportements émergents R1 ont été observés sur des problèmes math /
+code où la chaîne de raisonnement est longue et vérifiable par étapes
+intermédiaires. TextCraft a des actions atomiques courtes, peu d'espace
+pour de la self-verification non-triviale.
+
+Décision : **ne pas faire** sur TextCraft. Si on voulait explorer R1-Zero
+style, il faudrait étendre AgentGym-RL à un environnement plus
+raisonnement-bound (Deep Search, ScienceWorld, ou un domaine custom).
+
+### Plan d'attaque recommandé
+
+Ordre d'exécution séquentielle, chaque étape conditionne la suivante :
+
+1. **Niveau 1 d'abord** (1 h de travail, pas de GPU). Si Pass@1 baseline
+   18/100 → 23+/100, on a déjà battu tous nos runs RL précédents
+   gratuitement. Documente honnêtement le gain dans le worklog.
+2. **Si Niveau 1 marche** : Niveau 2 (un run RL de 50 steps avec le
+   reward v4). Objectif : transformer le gain prompt-based en gain
+   model-based qui survit même sans prompt élaboré.
+3. **Si Niveau 2 marche mais plafonne** : Niveau 3 (cold-start SFT).
+   Coût plus élevé mais marge plus grande.
+4. **Niveau 4 jamais** sur TextCraft seul.
+
+### Méta-question : on a quand même la base instruct comme point de départ
+
+Une remarque honnête à garder en tête : si on fait Niveau 3 en partant
+d'un modèle plus capable (genre R1-Distill-Qwen-7B au lieu de
+Qwen-3B-Instruct), on ne saura **plus** isoler la contribution du RL
+vs celle du prior reasoning. Pour avoir une science propre, il faudrait
+les 4 cases du 2×2 :
+
+|                         | Sans RL                  | Avec RL                  |
+|-------------------------|--------------------------|--------------------------|
+| Qwen-3B-Instruct        | (1) baseline 18/100      | (2) v2/v3 ≤ 14/100       |
+| R1-Distill-Qwen-7B      | (3) à mesurer            | (4) à mesurer            |
+
+La cellule (3) seule est intéressante : elle dit ce qu'un modèle déjà
+"reasoning" apporte sur TextCraft **sans aucun training spécifique**.
+Si (3) > (2), ça met directement en question l'intérêt du RL agentique
+sur des petits modèles non-reasoning, et oriente vers Niveau 3 avec un
+backbone reasoning. Mesure peu coûteuse à faire (juste un eval avec
+`scratch/03_eval_qwen.py` adapté pour charger R1-Distill).
+
+**À planifier** comme expérience de side : avant de relancer du RL,
+faire l'éval (3) seule pour avoir le bon repère.
+
+
+---
+
+## 2026-05-12 — Audit verl + smoke tests avant migration 8× A100
+
+But : avant de killer la VM et provisionner une 8× A100 40 Go pour
+répliquer la recette papier avec verl tel quel, vérifier que (a) la
+math/algo de verl est correcte, et (b) qu'on n'a pas raté un quick win
+qui permettrait de le faire tourner sur 1 GPU.
+
+### Smoke (a) — `scratch/smoke_verl_test.py` (offline, CPU, ~12 s)
+
+Trois unit tests sur les briques critiques de verl. **3/3 PASS.**
+
+1. `compute_grpo_outcome_advantage` (GRPO advantage math)
+   - Prompt avec rewards `[1, 0, 1, 0]` → advantages normalisés à
+     `±0.866` ; `returns == advantages`.
+   - Prompt avec rewards tous égaux → advantages à 0 (pas de signal,
+     comportement attendu).
+
+2. `RolloutHandler.add_assistant_message` (token-level loss_mask sur
+   Qwen ChatML)
+   - `input_ids`, `attention_mask`, `position_ids`, `loss_mask` même
+     longueur.
+   - Prompt initial : `loss_mask=0` partout.
+   - 11 tokens passent à `loss_mask=1` et correspondent exactement au
+     contenu assistant injecté.
+
+3. `RLHFDataset` prompt vs `scratch/03_eval_qwen.py` prompt (parité
+   train/eval)
+   - Les deux prompts font **1382 chars** chacun.
+   - **Identiques byte-for-byte** : mêmes règles TextCraft
+     (`conversation_start[0]`), même ACK assistant, aucun few-shot ni
+     primer caché côté verl.
+
+→ Pas de bricolage opaque côté upstream. Si on entraîne avec verl on
+verra exactement le même prompt qu'à l'eval — pas de drift.
+
+### Smoke (b) — `examples/eval/textcraft_eval.local.sh` (on-GPU, 1× A100)
+
+But : faire passer 100 items d'eval verl bout-en-bout (Qwen-3B brut)
+sur un seul GPU. **FAIL — crash NCCL.**
+
+Setup au moment du lancement : GPU 0 MiB / 0 %, TextCraft serveur up
+(pid 71473), `load_format=safetensors`, `gpu_memory_utilization=0.85`,
+`tensor_model_parallel_size=1`.
+
+Séquence du crash (`/tmp/smoke_verl_eval.log`) :
+- Worker Ray spawn OK.
+- Qwen-3B chargé sur CPU (`Loading checkpoint shards: 2/2` OK).
+- `NCCL version 2.20.5+cuda12.4` imprimé.
+- **Worker meurt immédiatement** (`SYSTEM_ERROR`, exit code 2,
+  pas de Python traceback) — c'est un SIGSEGV silencieux.
+
+Diagnostic :
+- `dmesg --since "5 min ago"` : pas d'OOM-killer.
+- GPU à 0 MiB avant et après → pas un OOM côté CUDA.
+- Crash avant le chargement vLLM des poids → pas un problème de
+  weights/safetensors.
+- → C'est l'init du process group NCCL à `world_size=1` qui plante.
+  Comportement non testé côté upstream verl (le fork suppose
+  ≥ 2 ranks).
+
+C'est **exactement la même panne** que celle déjà documentée
+(`Error 4` — Ray ActorDiedError pendant
+`verl.agent_trainer.main_generation`) au début du projet. On confirme
+donc empiriquement la conclusion de l'audit code : **le code path
+single-GPU de verl ne marche pas**, patcher prendrait des jours sans
+garantie.
+
+### Décision
+
+- Smoke (a) ✅ : on a la garantie que la math de verl est bonne et que
+  son prompt = notre prompt d'eval. Pas de drift caché.
+- Smoke (b) ❌ : on ne peut pas tourner verl tel quel sur 1 GPU, même
+  pour de l'eval. Donc inutile d'essayer pour du training.
+- → On provisionne **8× A100 40 Go** depuis le snapshot disque actuel
+  et on lance `examples/train/AgentGym-RL/textcraft_train.sh` avec
+  juste deux overrides pour le 40 Go vs 80 Go :
+  `actor_rollout_ref.rollout.gpu_memory_utilization=0.65`
+  et `data.max_response_length=8192` (down de 10240). Le reste de la
+  recette papier reste intact (N=8, bs=32, full FT FSDP,
+  kl_coef=0.001, rounds=30, lr=1e-6).
+
+Détails dans [`docs/RESULTS.md`](docs/RESULTS.md) §"Audit verl + smoke
+tests (préalable à la migration 8× A100)".
+

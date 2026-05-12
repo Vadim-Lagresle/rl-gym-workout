@@ -395,3 +395,70 @@ mesurer la valeur de méthodologies type ScalingInter / SCPO / West-of-N
 sur TextCraft, il faudra d'abord obtenir une machine qui permette N ≥ 4
 et idéalement la recette papier complète.
 
+---
+
+### Audit verl + smoke tests (préalable à la migration 8× A100)
+
+**Contexte** : avant de provisionner une VM 8× A100 40 Go pour répliquer la
+recette papier avec **verl** (= la stack `AgentGym-RL/verl` non patchée),
+on a fait deux smoke tests pour vérifier (a) que l'algo de verl est
+correct et (b) qu'on peut réellement faire tourner leur eval pipeline.
+
+#### Smoke (a) — Tests offline sur `verl` (`scratch/smoke_verl_test.py`)
+
+Trois unit tests CPU-only, ~12 s total :
+
+| Test | Cible | Résultat |
+|---|---|---|
+| `compute_grpo_outcome_advantage` | math de la baseline relative GRPO sur 3 prompts (mixte / tout 0 / tout 1) | ✅ advantages normalisés à `±0.866` quand `std > 0`, à `0` sinon ; `returns == advantages` |
+| `RolloutHandler.add_assistant_message` | construction du `loss_mask` token-level (Qwen ChatML) | ✅ longueurs cohérentes, prompt `mask=0`, 11 tokens `mask=1` couvrant *exactement* le contenu assistant |
+| `RLHFDataset` prompt vs `scratch/03_eval_qwen.py` prompt | parité train/eval (pas de drift, pas de few-shot caché) | ✅ **prompts identiques byte-for-byte** (1382 chars chacun) — mêmes règles TextCraft, même ACK assistant canonique |
+
+**Conclusion** : la machinerie verl est mathématiquement correcte et le
+prompt qu'elle voit en training est exactement celui qu'on utilise en
+eval. Pas de bricolage caché côté upstream.
+
+#### Smoke (b) — Eval verl on-GPU sur 1× A100 40 Go (`examples/eval/textcraft_eval.local.sh`)
+
+| Étape | Statut |
+|---|---|
+| TextCraft serveur up (port 36005) | ✅ |
+| Dataset eval recopié (100 items) | ✅ |
+| Worker Ray spawn + Qwen-3B chargé (CPU, checkpoint shards) | ✅ |
+| **NCCL init (rank=1 sur 1)** | ❌ **SIGSEGV silencieux** |
+
+Trace pertinente (`/tmp/smoke_verl_eval.log`) :
+
+```
+(ActorRolloutRefWorker pid=152894) NCCL version 2.20.5+cuda12.4
+(raylet) A worker died or was killed... Worker exit type: SYSTEM_ERROR
+ray.exceptions.ActorDiedError: ... pid: 152894 ...
+```
+
+`dmesg` ne montre **aucun OOM-killer**, la VRAM était à 0 MiB avant
+lancement. Le crash arrive **immédiatement après** le print de la
+version NCCL et **avant** tout chargement vLLM des poids sur GPU. Ce
+n'est donc ni un problème mémoire, ni un problème de poids — c'est
+l'init du process group NCCL à `world_size=1` qui plante.
+
+**C'est exactement la même panne qu'en Phase B il y a 3 semaines** (cf.
+WORKLOG, "Error 4 : Ray ActorDiedError pendant
+`verl.agent_trainer.main_generation`"). On confirme donc empiriquement
+ce que l'audit code-level avait prédit : le code path single-GPU de
+verl n'est pas testé / pas fonctionnel, et patcher demanderait des
+jours sans garantie.
+
+#### Implications pour la suite
+
+| Question | Réponse |
+|---|---|
+| L'algo verl est-il bon ? | **Oui** (smoke (a)) |
+| Peut-on l'utiliser sur 1 GPU ? | **Non** (smoke (b)), même pour de l'eval |
+| Que faire ? | Provisionner ≥ 2 GPUs et utiliser verl tel quel |
+| Combien de GPUs pour la recette papier exacte (N=8, bs=32, full FT, max_resp=10240) ? | **8× A100 40 Go** (~320 Go agrégés ≈ paper setup avec FSDP) |
+| Plan B si 8× A100 indisponible ? | Garder la stack TRL+LoRA actuelle, mais cap matériel = baseline |
+
+Décision : on **provisionne 8× A100 40 Go** et on lance directement la
+recette `textcraft_train.sh` avec les overrides 40 Go (`gpu_memory_utilization=0.65`,
+`max_response_length=8192`, sinon paramètres papier inchangés).
+
