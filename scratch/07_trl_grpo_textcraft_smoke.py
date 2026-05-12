@@ -293,6 +293,15 @@ def main() -> None:
             "=20 from step 38. Empty string keeps the fixed MAX_SIM_ROUNDS cap."
         ),
     )
+    parser.add_argument(
+        "--resume-from-checkpoint",
+        type=str,
+        default="",
+        help=(
+            "Path to a TRL checkpoint dir (e.g. saves/.../checkpoint-25) "
+            "to resume training state from. Empty = fresh run."
+        ),
+    )
     args = parser.parse_args()
 
     if args.max_rounds_schedule:
@@ -356,7 +365,8 @@ def main() -> None:
         rollout_func=textcraft_rollout_func,
     )
 
-    trainer.train()
+    resume = args.resume_from_checkpoint if args.resume_from_checkpoint else None
+    trainer.train(resume_from_checkpoint=resume)
     print("[smoke] TRL+GRPO training run finished")
 
 
