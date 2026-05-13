@@ -28,6 +28,12 @@ Mode resume (par défaut) : si un item a déjà un log valide dans
 rollout. Pratique pour reprendre après une interruption (préemption Spot,
 SIGTERM volontaire, etc.) ou pour ne réévaluer qu'un sous-ensemble. Mettre
 `FORCE_REDO=1` pour tout recalculer.
+
+Métrique « Pass@1 » en fin de script : **une trajectoire indépendante par
+problème du test set** (k=1 essai / item), pas « un seul tour LLM↔env ».
+Chaque épisode peut aller jusqu'à ``MAX_ROUNDS`` (30) interactions, comme
+dans le setup papier TextCraft. Pour un pass@k d'éval avec k>1, il faudrait
+k rollouts distincts par ``item_id`` (non implémenté ici).
 """
 
 from __future__ import annotations
@@ -45,9 +51,9 @@ from vllm import LLM, SamplingParams
 
 
 REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
-MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
+MODEL_PATH = Path(os.environ.get("MODEL_PATH", str(REPO_ROOT / "models" / "Qwen2.5-3B-Instruct")))
 DATASET_PATH = REPO_ROOT / "AgentEval" / "eval" / "textcraft_test.json"
-LOG_DIR = REPO_ROOT / "scratch" / "eval_logs"
+LOG_DIR = Path(os.environ.get("EVAL_LOG_DIR", str(REPO_ROOT / "scratch" / "eval_logs")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 ENV_SERVER_URL = "http://127.0.0.1:36005"

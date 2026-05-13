@@ -1230,3 +1230,107 @@ Si tu reviens et que tu vois ce message en relisant le worklog : tu peux
 me demander directement *"on reprend la checklist 8× A100, étape 1"*, je
 saurai où on en est sans devoir tout redécouvrir.
 
+## Session 2026-05-13 — Exp 6 (réplication papier verl, Qwen-3B, 4× A100 40 GB)
+
+- VM passée de 1× A100 à **4× A100 40 GB** (compute_capability 8.0, driver 580 / CUDA 13).
+- Serveur TextCraft relancé `nohup setsid textcraft --host 127.0.0.1 --port 36005`.
+
+### Root cause du "crash NCCL world_size=1" qu'on traînait depuis 3 semaines
+
+C'était **pas** un bug de `verl` single-GPU. C'était un bug de l'image GCP A100 :
+`/etc/profile.d/env.sh` source `/usr/local/gib/scripts/set_nccl_env.sh`, qui force
+`NCCL_NET=gIB` + ~10 tuner flags InfiniBand. Le plugin gIB tente de charger
+`libibverbs.so` (non installé sur l'image), puis NCCL crash silencieusement
+juste après la ligne `NCCL version 2.20.5+cuda12.4` avec `SYSTEM_ERROR exit code 2`.
+On le reproduisait à world_size=1 ET à world_size=4 — d'où la confusion.
+
+Validé empiriquement via `scratch/smoke_fsdp_4gpu.py` (test FSDP standalone Qwen-3B
+4 GPUs) : on reproduit le crash avec l'env GCP par défaut, et il disparaît avec :
+
+```bash
+env -i ... LD_LIBRARY_PATH= NCCL_NET=Socket NCCL_IB_DISABLE=1 python3 ...
+```
+
+### Fix permanent dans `examples/train/AgentGym-RL/textcraft_train.4gpu.sh`
+
+Bloc "NCCL workaround for GCP A100 VMs" qui :
+- `unset` tous les `NCCL_*` injectés par gIB,
+- supprime `/usr/local/gib/lib64` du `LD_LIBRARY_PATH`,
+- force `NCCL_NET=Socket` et `NCCL_IB_DISABLE=1`.
+
+Le NVLink intra-node fonctionne quand même par-dessus le contrôle TCP. NCCL
+tombe en mode P2P/SHM natif et le bandwidth NVLink est utilisé pour les
+all-reduce/broadcast comme avant.
+
+### Autres workarounds nécessaires pour faire tourner verl tel quel
+
+1. **`load_format=safetensors` n'existe pas** dans l'enum `LoadFormat` du fork
+   `verl.third_party.vllm`. Notre `.local.sh` le forçait pour contourner le
+   crash NCCL en single-GPU. Sur 4 GPUs on retire l'override → le défaut
+   `dummy_dtensor` fonctionne (vLLM init avec poids aléatoires, puis sync
+   FSDP DTensor par le `FSDPVLLMShardingManager`).
+2. **VRAM 40 GB demande gradient_checkpointing=True + optimizer_offload=True
+   + gpu_memory_utilization=0.4 + max_response_length=4096**. Sans ces flags,
+   OOM à la première backward (37.66/40 GB déjà occupés, manque 4.6 GB).
+
+### Résultat smoke test (1 step) — PASS
+
+```
+step:1 - critic/task_score/mean: 0.016 - critic/task_score/max: 1.000
+       - actor/grad_norm: 0.421 - actor/pg_loss: 0.044 - actor/kl_loss: 0.001
+       - response_length/mean: 2065 - timing_s/step: 284s (gen 248 + ref 10 + upd 22)
+       - GPU memory used: ~23 GB / 40 GB per GPU
+```
+
+Pipeline complet upstream **directement réutilisable** sur notre matériel
+après les 3 fixes ci-dessus. Aucune modification du code Python verl.
+
+### Bilan run (2026-05-13)
+
+- Training **50 steps** terminé (run `agentgym_rl_qwen3b_4gpu_fixed_20260513_0941_a2a5b6d/`, logs sous `saves/` — gitignoré). Eval post-training + merge : voir section **« Session 2026-05-13 (fin) »** ci-dessous.
+
+### Nouveaux fichiers
+
+- `examples/train/AgentGym-RL/textcraft_train.4gpu.sh` — script training principal.
+- `examples/eval/textcraft_eval.4gpu_ckpt.sh` — merge FSDP + eval Pass@1.
+- `scratch/auto_eval_after_train.sh` — watcher PID → eval auto.
+- `scratch/smoke_fsdp_4gpu.py` — repro standalone du bug gIB.
+- `docs/CODE_GUIDE_AGENTGYM_RL.md` — guide de lecture complet de la stack.
+
+## Session 2026-05-13 (fin) — Eval post-training Exp 6, fix merge HF, courbes, clarification « Pass@1 »
+
+### Résultats enregistrés (dans le dépôt Git)
+
+| Artefact | Chemin |
+|---|---|
+| Logs épisode (100 JSON + transcripts) | `scratch/eval_logs_4gpu_global_step_50/textcraft_*.json` |
+| Tableau scores (CSV) | `scratch/eval_logs_4gpu_global_step_50/scores_table.csv` |
+| Résumé numérique (JSON) | `scratch/eval_logs_4gpu_global_step_50/scores_summary.json` |
+| Log texte vLLM / items | `scratch/eval_logs_4gpu_global_step_50/eval.log` |
+| Courbes training (PNG) | `scratch/training_curves.png`, `scratch/training_losses.png` |
+| Script agrégation reproductible | `scratch/summarize_textcraft_eval_dir.py` |
+
+**Eval** (checkpoint verl `global_step_50`, merge FSDP → HF, puis `scratch/03_eval_qwen.py` + vLLM standard, 100 items `textcraft_test.json`) :
+
+- **38 succès / 100** → **taux de réussite 38 %** sur le test set.
+- **Métrique affichée « Pass@1 » dans le script** : c’est le **même nombre** (38/100) parce qu’on ne fait **qu’un seul rollout indépendant par `item_id`**. Ce n’est **pas** une limite à « un tour » entre le LLM et TextCraft (voir paragraphe suivant).
+- `mean_rounds` (agrégat JSON) ≈ **21.2** tours / épisode en moyenne sur les 100 items — les succès utilisent souvent peu de tours, les échecs tapent souvent le plafond **30** (`MAX_ROUNDS` dans `03_eval_qwen.py`, aligné sur les **30 rounds** du training papier / `textcraft_train.4gpu.sh`).
+
+### Pourquoi le mot « Pass@1 » prête à confusion (et ce que le papier autorise vraiment)
+
+- Le papier / la config verl fixe un **horizon intra-épisode** : jusqu’à **30 allers-retours** modèle ↔ environnement **par problème** (une trajectoire).
+- Le nom **Pass@1** vient de la littérature *code generation* : **k essais indépendants sur le même problème** avant de compter un succès (ex. pass@64 = au moins un succès parmi 64 programmes tirés). Ici **k = 1** au sens **« un seul tirage complet par item d’éval »**, pas « une seule action ».
+- Donc : **30 tours max ≠ Pass@1**. Les deux axes sont orthogonaux : **tours** = profondeur d’une trajectoire ; **pass@k** = combien de trajectoires complètes on autorise par item. Notre script pourrait afficher « **success rate (1 trial/item)** » pour éviter l’ambiguïté ; le terme Pass@1 a été repris pour coller aux tableaux du papier (où le test final est aussi typiquement **une** politique évaluée sur N problèmes).
+
+### Modifs techniques effectuées (cette session / chat)
+
+1. **`examples/eval/textcraft_eval.4gpu_ckpt.sh`** — merge FSDP → HuggingFace **conditionnel corrigé** : avant, on ne lançait `model_merger.py` que si `actor/huggingface/config.json` était absent. Un merge interrompu laissait tokenizer + config **sans** `*.safetensors` → vLLM : `Cannot find any model weights`. Désormais on merge si aucun poids HF n’est détecté (`*.safetensors` ou `pytorch_model.bin`), ou si `FORCE_MERGE=1`.
+2. **`scratch/03_eval_qwen.py`** — `MODEL_PATH` et `EVAL_LOG_DIR` lus depuis l’environnement (pour l’eval checkpoint) ; docstring clarifiant Pass@1 vs `MAX_ROUNDS`.
+3. **`scratch/plot_training_curves.py`** (+ PNG) — courbes parsées depuis `run.log` (fichier sous `saves/…`, **gitignoré** ; les PNG dans `scratch/` documentent le run localement).
+4. **`scratch/summarize_textcraft_eval_dir.py`** — export CSV/JSON des scores à partir des logs d’épisode.
+
+### Training Exp 6 (rappel chiffré, `run.log` local)
+
+- **49 lignes** `step:N` parsées pour les courbes (steps 1–49 ; checkpoint `global_step_50` sauvegardé à la fin).
+- Somme des `timing_s/step` sur ces lignes ≈ **9617 s** (~2 h 40) de steps chronométrés ; wall-clock total training plus élevé (init Ray, checkpoints). Voir `saves/agentgym_rl_4gpu/agentgym_rl_qwen3b_4gpu_fixed_20260513_0941_a2a5b6d/run.log` sur la VM.
+

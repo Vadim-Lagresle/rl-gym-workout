@@ -31,7 +31,7 @@ Qwen2.5-3B-Instruct.
 | Env | TextCraft serveur HTTP local (127.0.0.1:36005) |
 | Train set | 256 problèmes (`--max-items 256`) |
 | Test set | 100 problèmes (indices 0..99 du pool TextCraft) |
-| Métrique principale | Pass@1 sur le test set |
+| Métrique principale | **Taux de réussite** sur le test set ; souvent noté *Pass@1* dans les scripts quand **un seul rollout indépendant** est tiré par problème (voir §Exp 6 — ce n’est pas la limite de tours LLM↔env). |
 
 L'eval Pass@1 utilise vLLM avec `enforce_eager=False` pour bénéficier des
 CUDA graphs avec LoRA (sinon ralentissement 100×, cf. issue résolue le
@@ -257,6 +257,154 @@ progression. Pas de perte de signal.
 
 ---
 
+### Exp 6 — Réplication papier upstream verl sur 4× A100 40 GB (Qwen-3B, GRPO, sans ScalingInter)
+
+**Objectif scientifique** : valider empiriquement si le code upstream
+`AgentGym-RL` (= verl + l'extension multi-tour vLLM des auteurs) est
+*directement réutilisable* tel quel sur notre matériel, et mesurer le
+Pass@1 obtenu. C'est la première fois qu'on quitte notre stack
+TRL+LoRA+rollout_func custom pour faire tourner exactement la recette
+de l'article. On choisit volontairement **`rounds_ctrl.type=fixed`**
+(pas de ScalingInter) pour avoir une baseline GRPO pure comparable à la
+ligne *AgentGym-RL-3B = 75/100* de la Table 3 du papier.
+
+**Réutilisabilité du code upstream — verdict avec preuves** :
+
+| Vérification | Statut | Détails |
+|---|---|---|
+| Math GRPO offline (advantages, loss_mask, prompt train/eval) | ✅ | 3/3 PASS dans `scratch/smoke_verl_test.py` (cf. Exp 5 *Audit verl*) |
+| Eval `main_generation` 1× A100 40 GB | ❌ | SIGSEGV NCCL à `world_size=1`, doc Exp 5 |
+| Eval `main_generation` 4× A100 40 GB | ⚠️ non re-testé (le training prime) |
+| **Training `main_ppo` 4× A100 40 GB**, Qwen-3B, recette papier | ✅ **après 3 workarounds** | cf. ci-dessous |
+
+Le code est réutilisable **moyennant trois workarounds non-triviaux** qui
+n'apparaissent nulle part dans le README upstream :
+
+1. **NCCL gIB sur image GCP A100**.
+   `/etc/profile.d/env.sh` source `/usr/local/gib/scripts/set_nccl_env.sh`
+   qui force `NCCL_NET=gIB` + une dizaine de tuner flags InfiniBand pour
+   les clusters A3-Ultra. Sur une box 4× A100 40 GB single-node, ce
+   plugin tente de charger `libibverbs` (non installé), puis crash
+   silencieux NCCL → `ray.exceptions.ActorDiedError` avec
+   `SYSTEM_ERROR exit code 2` immédiatement après la ligne
+   `NCCL version 2.20.5+cuda12.4`. Symptôme **identique** à celui qu'on
+   avait observé en single-GPU et attribué au "code path verl pas testé".
+   *C'était en fait un bug d'image GCP, pas un bug verl.*
+   **Fix** : avant `python3 -m verl.agent_trainer.main_ppo`, exécuter :
+   ```bash
+   unset NCCL_NET NCCL_TUNER_CONFIG_PATH NCCL_NET_GDR_LEVEL NCCL_CROSS_NIC \
+         NCCL_IB_* NCCL_NVLS_CHUNKSIZE NCCL_P2P_NET_CHUNKSIZE
+   export LD_LIBRARY_PATH="$(echo "$LD_LIBRARY_PATH" | tr ':' '\n' \
+                              | grep -v '/usr/local/gib' | paste -sd: -)"
+   export NCCL_NET=Socket
+   export NCCL_IB_DISABLE=1
+   ```
+   Le NVLink intra-node fonctionne quand même par-dessus le contrôle TCP.
+
+2. **`load_format=dummy_dtensor` obligatoire pour le training**.
+   L'enum `LoadFormat` dans `verl/third_party/vllm/vllm_v_0_6_3/config.py`
+   ne contient **pas** `safetensors` (que notre script local
+   `textcraft_train.local.sh` forçait pour contourner le crash NCCL
+   en single-GPU). Valeurs valides : `auto`, `hf`, `dtensor`, `megatron`,
+   `dummy_hf`, `dummy_megatron`, `dummy_dtensor`. En training, on garde
+   le défaut `dummy_dtensor` : vLLM init avec poids aléatoires puis se
+   fait patcher en place par le `FSDPVLLMShardingManager` à chaque batch
+   de génération.
+
+3. **VRAM 40 GB demande 3 concessions vs la recette papier**. Sans ces
+   trois flags, OOM à la première backward (37.66 GB déjà occupés,
+   manque 4.6 GB) :
+   - `actor_rollout_ref.model.enable_gradient_checkpointing=True`
+   - `actor_rollout_ref.actor.fsdp_config.optimizer_offload=True`
+     (push les states AdamW sur CPU — économie ~10 GB par GPU)
+   - `actor_rollout_ref.rollout.gpu_memory_utilization=0.4` (down de 0.7)
+   - `data.max_response_length=4096` (down de 10240)
+
+**Setup spécifique** :
+
+| Élément | Papier (textcraft_train.sh upstream, AgentGym-RL-3B) | Notre Exp 6 |
+|---|---|---|
+| Modèle | Qwen2.5-3B-Instruct | Qwen2.5-3B-Instruct ✅ |
+| Hardware | cluster (probablement ≥ 8× A100 80 GB) | 4× A100 **40 GB** single-node |
+| `rollout.n` (N) | 8 | **8** ✅ |
+| `train_batch_size` | 32 | **8** ⚠️ |
+| `ppo_mini_batch_size` | 8 | 8 ✅ |
+| `ppo_epochs` | 2 | 2 ✅ |
+| `max_response_length` | 10240 | **4096** ⚠️ |
+| `max_tokens` / turn | 512 | 512 ✅ |
+| `rollout.tensor_model_parallel_size` | 1 | 1 ✅ |
+| `kl_loss_coef`, `kl_loss_type` | 0.001, low_var_kl | 0.001, low_var_kl ✅ |
+| `lr` | 1e-6 | 1e-6 ✅ |
+| `rounds_ctrl.type` | fixed | fixed ✅ |
+| `rounds` | 30 | 30 ✅ |
+| Fine-tuning | full FT + FSDP | full FT + FSDP ✅ |
+| Gradient checkpointing | non (probable) | **oui** ⚠️ |
+| Optimizer offload to CPU | non | **oui** ⚠️ |
+| Total training steps | non capé (`total_epochs=30` → ≈ 12 × 30 = 360 steps avec bs=32) | **50 steps** ⚠️ (budget compute du run) |
+
+Script reproductible : `examples/train/AgentGym-RL/textcraft_train.4gpu.sh`.
+Lancement : `bash examples/train/AgentGym-RL/textcraft_train.4gpu.sh`
+(50 steps par défaut ; `SMOKE=1` pour un test 1-step ; `TOTAL_STEPS=N`
+pour override).
+
+**Smoke test (1 step) — VRAI succès** (run dir
+`saves/agentgym_rl_4gpu/smoke_4gpu_v4`) :
+
+| Métrique | Valeur |
+|---|---:|
+| `critic/task_score/mean` step 1 | **0.016** (1 succès / 8 rollouts × 8 GPUs = ~1/64) |
+| `critic/task_score/max` step 1 | 1.0 |
+| `actor/grad_norm` step 1 | 0.421 |
+| `actor/pg_loss` step 1 | 0.044 |
+| `actor/kl_loss` step 1 | 0.001 |
+| `actor/entropy_loss` step 1 | 1.157 |
+| `response_length/mean` step 1 | 2065 tokens |
+| `timing_s/step` | **284 s** (gen 248 s + ref 10 s + update 22 s) |
+| GPU memory used (FSDP+optim CPU offload+vLLM 40 %) | ~23 GB / 40 GB par GPU |
+
+Pas d'OOM, pas de crash NCCL, pas d'erreur Ray. Le pipeline est stable
+et la marge VRAM (~17 GB libres / GPU) laisse de la place pour scaler.
+
+**Résultats du run 50 steps + eval sur `global_step_50`** (merge FSDP → HF,
+`scratch/03_eval_qwen.py`, vLLM standard, **2026-05-13**) :
+
+| Métrique | Papier (AgentGym-RL-3B, ~120 steps, Table 3) | Mesure Exp 6 (50 steps, 4× A100 40 GB) |
+|---|---:|---:|
+| **Succès / 100** (un rollout par item) | **75 / 100** | **38 / 100** (38 %) |
+| Libellé script | *Pass@1* | identique : **1 essai complet / problème**, pas « 1 tour » |
+| Tours max LLM↔env (eval) | 30 | **30** (`MAX_ROUNDS` dans `03_eval_qwen.py`) |
+| `mean_rounds` (moyenne sur 100 épisodes) | — | **21.2** (agrégat `scores_summary.json`) |
+| `train_loss` final (dernier step loggué) | non communiqué | extraire depuis `run.log` local si besoin |
+| Somme `timing_s/step` (49 steps loggués) | — | **≈ 9617 s** (~2 h 40) de boucles step chronométrées |
+
+**Artefacts versionnés** (dans le dépôt) :
+
+- `scratch/eval_logs_4gpu_global_step_50/textcraft_*.json` — trajectoires complètes.
+- `scratch/eval_logs_4gpu_global_step_50/scores_table.csv` — tableau par item.
+- `scratch/eval_logs_4gpu_global_step_50/scores_summary.json` — totaux.
+- `scratch/training_curves.png`, `scratch/training_losses.png` — courbes depuis `run.log` (fichier log sous `saves/`, non versionné).
+
+**Clarification « Pass@1 » vs 30 rounds** : le papier autorise jusqu’à **30 interactions** par épisode (comme notre eval). Le **@1** signifie **un seul tirage stochastique complet par item de test**, au sens *HumanEval-style* (k programmes / k trajectoires **indépendantes** pour le même exercice). Ce n’est **pas** « une seule action » ni « un seul tour » : une trajectoire peut utiliser jusqu’à 30 tours ; le compte **38/100** est le nombre de problèmes résolus avec **une** trajectoire chacun.
+
+**Bornes attendues** (inchangées par rapport à la rédaction précédente) :
+
+- Le papier atteint 75/100 à la fin de **~30 epochs** ≈ 360 steps avec
+  `train_batch_size=32`. Au step 50 avec notre `train_batch_size=8`,
+  on a vu seulement `50 × 8 = 400 queries` (vs `50 × 32 = 1600` chez
+  le papier au même step). On est donc à **~7×** moins d'exposition à
+  data train.
+- Ordre de grandeur réaliste pour notre 50-step run : Pass@1 ≈ **30-50 / 100**
+  (entre baseline 18 et papier final 75), avec la pente la plus rapide
+  en début de training. Pour atteindre 75/100 il faudrait probablement
+  300-360 steps ≈ 28 h sur ce hardware.
+
+**Constat (50 steps)** : **38/100** dépasse nettement le baseline TRL **18/100**,
+ce qui confirme que la recette verl (N=8, full FT, GRPO upstream) exploite
+mieux le signal que notre stack TRL+LoRA contrainte — tout en restant **sous**
+le **75/100** papier (moins de steps, `train_batch_size` réduit, `max_response_length` abaissé, cf. tableau setup Exp 6).
+
+---
+
 ### (À venir) Exp 5 — Continued GRPO depuis v4, comparaison reward env vs reward SCPO
 
 **Objectif scientifique** : tester si une "self-consistency reward" basée
@@ -307,6 +455,7 @@ Pour chaque problème, parmi les 4 trajectoires :
 | **v4-ScalingInter-sparse** | 50 | ~31 min + resume | **14 / 100** | **−4** | sparse reward + curriculum, +6 vs v3 mais ne bat pas baseline |
 | v4+envreward (T3-A) | 50+50 | *abandonné* | — | — | dépendait de gain v4, voir Exp 5 |
 | v4+scporeward (T3-B) | 50+50 | *abandonné* | — | — | dépendait de gain v4, voir Exp 5 |
+| **Exp 6 verl 4× A100** | 50 | ~2 h 40 (somme `timing_s/step` sur 49 logs) + overhead | **38 / 100** | **+20** vs baseline 18 | checkpoint `global_step_50`, full FT, N=8, `rounds=30`, cf. §Exp 6 |
 
 **Reference du papier AgentGym-RL** (Table 2, Yang et al. 2026) :
 Qwen2.5-3B-Instruct + GRPO + full FT + N=8 + max_turns=30 constant → **Pass@1 = 75 / 100**.
