@@ -1336,6 +1336,57 @@ après les 3 fixes ci-dessus. Aucune modification du code Python verl.
 
 ---
 
+## Session 2026-05-18 — Réorganisation complète du dépôt (directives encadrant)
+
+Suite à une réunion avec l'encadrant chercheur, le dépôt a été restructuré pour séparer
+clairement le code qu'on a écrit, les dépendances externes, les données et les résultats par run.
+
+### Modifications effectuées
+
+| Opération | Avant | Après |
+|---|---|---|
+| Scripts principaux | `scratch/03_eval_qwen.py`, `07_trl_grpo_textcraft_smoke.py`, … | `src/eval_baseline.py`, `src/train_grpo.py`, … |
+| Scripts exploration | `scratch/01_minicycle.py`, `02_…`, `06_…`, `10_…`, `smoke_*` | `runs/prototypes/` |
+| Logs d'éval par run | `scratch/eval_logs*/` (6 dossiers) | `runs/exp*/eval_logs*/` |
+| Datasets | `AgentEval/` | `data/` |
+| Dépendances externes | `AgentGym/`, `AgentGym-RL/`, `examples/` à la racine | `external/AgentGym/`, `external/AgentGym-RL/`, `external/agentgym_rl_paper/` |
+| PDFs des papiers | `2406.04151v1.pdf`, `2509.08755v1.pdf` à la racine | `docs/references/agentgym_rl_paper.pdf`, `docs/references/agenteval_dataset_paper.pdf` |
+| Images README fork | `assets/` (11 fichiers) | supprimé |
+| Configs Hydra verl | `outputs/2026-05-*/` | supprimé (redondant avec scripts dans `external/`) |
+| `scratch/` | dossier fourre-tout | supprimé après vidage |
+
+### Nouveaux fichiers créés
+
+- `external/USAGE.md` — liste exacte des fichiers utilisés dans les dépendances externes (server TextCraft, verl)
+- `runs/exp*/config.yaml` — config + hyperparamètres + résultats + verdict pour chaque expérience
+
+### Chemins mis à jour dans les scripts
+
+Tous les chemins fonctionnels cassés par la réorganisation ont été corrigés dans `src/` :
+
+| Script | Chemin corrigé |
+|---|---|
+| `src/eval_baseline.py` | `AgentEval/eval/` → `data/eval/` ; `scratch/eval_logs` → `runs/exp1_baseline/eval_logs` |
+| `src/eval_lora.py` | `AgentEval/eval/` → `data/eval/` ; `scratch/eval_logs_*` → `runs/eval_logs_*` |
+| `src/train_grpo.py` | `AgentEval/train/` → `data/train/` |
+| `src/compare_runs.py` | `scratch/eval_logs*` → `runs/exp*/eval_logs*` |
+| `src/analyze_eval.py` | `__file__.parent/eval_logs` → `runs/exp1_baseline/eval_logs` |
+| `src/plot_curves.py` | `scratch/training_curves.png` → `runs/training_curves.png` |
+| `src/auto_eval.sh` | `examples/eval/` → `external/agentgym_rl_paper/eval/` |
+
+### .gitignore — rien modifié
+
+Le `.gitignore` existant couvre déjà tout correctement :
+- `saves/` — checkpoints modèles (trop lourds, locaux uniquement)
+- `models/` — poids Qwen de base
+- `__pycache__/`, `*.pyc` — bytecode Python
+- `*.pdf` — PDFs des papiers (déplacés dans `docs/references/` mais toujours gitignorés)
+- `wandb/`, `checkpoints/`, `executer_logs/` — artefacts training
+
+**Aucune ligne ajoutée au `.gitignore` lors de cette session.**
+
+---
+
 ## TODO prochaine session training
 
 - [ ] **Ablation LoRA vs full FT** : lancer un run LoRA (r=16) avec exactement les mêmes hyperparamètres que Exp 6 (N=8, batch=8, max_response_length=4096, 4× A100) pour isoler proprement l'effet du fine-tuning method. Si LoRA atteint le même Pass@1 → les optimizer states libérés (~10-12 Go/GPU) peuvent être réinvestis en `max_response_length` plus grand (8192 voire 10240) et `max_model_len` plus grand. Si LoRA rate → confirme que full FT est nécessaire pour cette tâche.

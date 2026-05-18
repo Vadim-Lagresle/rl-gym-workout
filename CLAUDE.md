@@ -30,25 +30,37 @@ comment y remédier avec les outils modernes (curriculum, SCPO, BOND, CoT, mix S
 
 ```
 rl-gym-workout/
-├── AgentGym/           # submodule — envs + clients HTTP
-├── AgentGym-RL/        # submodule — verl fork (trainer, rollout, PPO/GRPO)
-├── AgentEval/          # datasets train/test par env (JSON)
-├── scratch/            # scripts numérotés 01_…10_ + utilitaires
-├── examples/           # eval/ et train/ — scripts de référence papier
-├── docs/               # RESULTS.md (résultats structurés), guides techniques
-├── outputs/            # checkpoints par date
-├── saves/              # sauvegardes modèles LoRA
-├── setup/              # requirements + setup.sh
-└── WORKLOG.md          # journal chronologique de session
+├── src/                    # scripts principaux (train, eval, analyse, utils)
+├── runs/                   # un sous-dossier par expérience (config.yaml + eval_logs)
+│   ├── exp1_baseline/
+│   ├── exp2_grpo_v2/
+│   ├── exp3_grpo_v3/
+│   ├── exp4_grpo_v4_scalinginter/
+│   ├── exp6_verl_4gpu/
+│   └── prototypes/         # scripts d'exploration archivés
+├── external/               # tout le code qu'on n'a pas écrit
+│   ├── AgentGym/           # submodule — envs + clients HTTP TextCraft
+│   ├── AgentGym-RL/        # framework verl (trainer, rollout, PPO/GRPO)
+│   ├── agentgym_rl_paper/  # scripts de référence du papier (eval/ + train/)
+│   └── USAGE.md            # quels fichiers on utilise réellement dans external/
+├── data/                   # datasets train/test par env (JSON)
+├── docs/                   # RESULTS.md, guides techniques, references/ (PDFs)
+├── saves/                  # checkpoints locaux — gitignorés (trop lourds)
+├── models/                 # modèle de base Qwen — gitignorés
+├── setup/                  # requirements + setup.sh
+└── WORKLOG.md              # journal chronologique de session
 ```
 
 **Fichiers clés à connaître :**
-- `scratch/07_trl_grpo_textcraft_smoke.py` — script principal d'entraînement (toutes les versions v2→v4)
-- `scratch/03_eval_qwen.py` / `scratch/08_eval_qwen_lora.py` — évaluation baseline et LoRA
+- `src/train_grpo.py` — script TRL GRPO (toutes les versions v2→v4)
+- `src/eval_baseline.py` / `src/eval_lora.py` — évaluation baseline et LoRA
+- `runs/expN_*/config.yaml` — config, hyperparamètres et résultats de chaque run
+- `external/USAGE.md` — quels fichiers on utilise dans les dépendances externes
+- `external/agentgym_rl_paper/train/AgentGym-RL/textcraft_train.4gpu.sh` — script training verl 4-GPU
 - `docs/RESULTS.md` — tableau de résultats structuré (référence)
 - `WORKLOG.md` — contexte de session, procédure de reprise
-- `AgentGym-RL/verl/workers/rollout/agent_vllm_rollout/vllm_rollout.py` — rollout multi-tour
-- `AgentGym-RL/verl/agent_trainer/ppo/ray_trainer.py` — boucle PPO + ScalingInter
+- `external/AgentGym-RL/verl/workers/rollout/agent_vllm_rollout/vllm_rollout.py` — rollout multi-tour
+- `external/AgentGym-RL/verl/agent_trainer/ppo/ray_trainer.py` — boucle PPO + ScalingInter
 
 ## Résultats actuels (résumé)
 

@@ -17,7 +17,7 @@ from agentenv.envs import TextCraftEnvClient
 
 REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
 MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
-TRAIN_PATH = REPO_ROOT / "AgentEval" / "train" / "textcraft_train.json"
+TRAIN_PATH = REPO_ROOT / "data" / "train" / "textcraft_train.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 
 SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."

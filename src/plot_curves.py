@@ -122,11 +122,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("log", nargs="?", default=None,
                         help="Path to run.log (default: latest in saves/agentgym_rl_4gpu/)")
-    parser.add_argument("--out", default="scratch/training_curves.png",
+    parser.add_argument("--out", default="runs/training_curves.png",
                         help="Output PNG path (overview 4×2)")
     parser.add_argument(
         "--loss-out",
-        default="scratch/training_losses.png",
+        default="runs/training_losses.png",
         help="Output PNG for actor loss panel only (2×2). Use empty string to skip.",
     )
     args = parser.parse_args()

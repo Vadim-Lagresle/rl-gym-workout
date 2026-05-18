@@ -1,0 +1,36 @@
+name: grpo_v2
+date: 2026-05-05
+description: >
+  Premier run GRPO TRL. Reward shaping bugué : count_actions opère sur la
+  completion concaténée (tous les tours collés bout à bout) au lieu du
+  per-turn. Récompense involontairement les completions courtes.
+
+algorithm: GRPO (TRL 0.19.1)
+model: Qwen2.5-3B-Instruct
+script: src/train_grpo.py  # version v2
+
+training:
+  fine_tuning: LoRA (rank=16, alpha=32)
+  batch_size: 1
+  num_generations: 2
+  max_completion_length: 128 tokens
+  max_rounds: 20
+  learning_rate: 1e-6
+  reward: "episode_reward + 0.02*(count==1) - 0.05*(count>1) - 0.01*invalid_steps"
+  reward_bug: count_actions sur completion entière, pas per-turn
+
+results:
+  step10:
+    pass_at_1: "18/100 (18%)"
+    train_time: "~15 min"
+    eval_logs: eval_logs_step10/
+  step50:
+    pass_at_1: "14/100 (14%)"
+    train_time: "~67 min"
+    grad_norm_max: 1765.89  # spike step 35-36
+    eval_logs: eval_logs_step50/
+
+verdict: >
+  Reward hacking au sens strict (Skalse et al.) : le modèle optimise parfaitement
+  une fonction qui encode mal l'intention. Apprend à être court et à échouer
+  proprement plutôt qu'à résoudre le problème en multi-tour.

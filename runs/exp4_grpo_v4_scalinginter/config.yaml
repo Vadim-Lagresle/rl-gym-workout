@@ -1,0 +1,34 @@
+name: grpo_v4_scalinginter
+date: 2026-05-09
+description: >
+  Reward sparse pur (0/1, aligné papier) + curriculum ScalingInter sur max_rounds.
+  Suppression complète du shaping. Incident : serveur TextCraft mort à step 28,
+  resume propre depuis checkpoint-25.
+
+algorithm: GRPO (TRL 0.19.1) + ScalingInter curriculum
+model: Qwen2.5-3B-Instruct
+script: src/train_grpo.py  # version v4
+
+training:
+  fine_tuning: LoRA (rank=16, alpha=32)
+  batch_size: 1
+  num_generations: 2
+  max_completion_length: 128 tokens
+  learning_rate: 1e-6
+  max_grad_norm: 1.0
+  reward: "episode_reward (sparse 0/1 only)"
+  max_rounds_schedule: "5:step0, 10:step13, 15:step26, 20:step38"
+  steps: 50
+
+results:
+  step50:
+    pass_at_1: "14/100 (14%)"
+    train_time: "~31 min (run + resume)"
+    mean_rounds: 27.1
+    eval_logs: eval_logs_step50/
+
+verdict: >
+  +6 vs v3 confirme que le shaping +0.02 était le poison principal.
+  Mais N=2 + reward sparse = 70% des steps sans gradient utile
+  (borne mathématique : 2p(1-p) ≈ 30% à p=0.18). Ne bat pas le baseline.
+  Pour progresser : N≥4, full FT, ou plus de compute (→ Exp 6).

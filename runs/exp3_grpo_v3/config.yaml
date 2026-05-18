@@ -1,0 +1,33 @@
+name: grpo_v3
+date: 2026-05-07
+description: >
+  Fix du shaping v2 : count_actions devient mean_n_actions_per_turn (moyenne
+  par message d'assistant). Ajout de max_grad_norm=1.0. Hypothèse : le
+  pattern reward-vs-longueur disparaît. Résultat : non, empire encore.
+
+algorithm: GRPO (TRL 0.19.1)
+model: Qwen2.5-3B-Instruct
+script: src/train_grpo.py  # version v3
+
+training:
+  fine_tuning: LoRA (rank=16, alpha=32)
+  batch_size: 1
+  num_generations: 2
+  max_completion_length: 128 tokens
+  max_rounds: 20
+  learning_rate: 1e-6
+  max_grad_norm: 1.0  # nouveau vs v2
+  reward: "episode_reward + 0.02*(0.9<=mean<=1.1) - 0.05*(mean>1.5 or mean<0.5) - 0.01*invalid_steps"
+  steps: 50
+
+results:
+  step50:
+    pass_at_1: "8/100 (8%)"
+    train_time: "~69 min"
+    mean_rounds: 27.8
+    eval_logs: eval_logs_step50/
+
+verdict: >
+  Le +0.02 per-turn récompense toujours les échecs courts bien formatés
+  (base_reward=0, shape=+0.02 → avantage positif dans le groupe). Tout
+  shaping non-sparse sur reward vérifiable doit être banni. → mène à v4.

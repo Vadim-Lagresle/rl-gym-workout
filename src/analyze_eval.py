@@ -16,7 +16,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-LOG_DIR = Path(__file__).resolve().parent / "eval_logs"
+LOG_DIR = Path(__file__).resolve().parent.parent / "runs" / "exp1_baseline" / "eval_logs"
 
 ACTION_RE = re.compile(r"^Action:\s*(.+?)\s*$", re.MULTILINE)
 INVALID_PATTERNS = (

@@ -1,26 +1,39 @@
 """
-Évaluation de Qwen2.5-3B-Instruct + LoRA sur TextCraft.
+Évaluation manuelle de Qwen2.5-3B-Instruct sur TextCraft, sans verl/Ray.
 
-Variante de `scratch/03_eval_qwen.py` qui charge un adaptateur LoRA produit par
-notre training TRL+GRPO (`scratch/07_trl_grpo_textcraft_smoke.py`). Logs sortis
-dans un répertoire dédié pour ne pas écraser ceux du baseline non-LoRA.
+Pourquoi ce script existe : `examples/eval/textcraft_eval.local.sh` invoquait
+`verl.agent_trainer.main_generation` qui passe par un fork custom de vLLM
+(`verl.third_party.vllm`) avec un `load_format=dummy_dtensor`. Ce flow est conçu
+pour évaluer un checkpoint qui sort d'un training PPO multi-GPU avec FSDP : il
+init NCCL puis attend qu'on patche les vrais poids depuis un DTensor FSDP. Pour
+notre cas (modèle HF brut, 1 A100), l'init NCCL crash en SIGSEGV silencieux.
+
+Ce script reproduit donc la boucle de rollout multi-tour directement avec :
+  - vLLM "standard" (l'install pip dans `agentgym-rl`)
+  - `agentenv.envs.TextCraftEnvClient` (le wrapper HTTP, intact)
+  - `tokenizer.apply_chat_template` pour formater les conversations Qwen
 
 Pré-requis :
-  1. Serveur TextCraft sur 127.0.0.1:36005.
+  1. Serveur TextCraft sur 127.0.0.1:36005 (cf. WORKLOG.md, démarrage hors sandbox).
   2. Conda env `agentgym-rl` activé.
-  3. Un checkpoint LoRA peft valide (contient `adapter_config.json` +
-     `adapter_model.safetensors`).
 
-Lancement (exemples) :
+Lancement :
     conda activate agentgym-rl
-    LORA_PATH=saves/trl_grpo/trl_grpo_rolloutfunc_v2_step10/checkpoint-10 \\
-        python scratch/08_eval_qwen_lora.py
-    LORA_PATH=... MAX_ITEMS=30 python scratch/08_eval_qwen_lora.py
-    LORA_PATH=... EVAL_TAG=step10 python scratch/08_eval_qwen_lora.py
-    LORA_PATH=... FORCE_REDO=1 python scratch/08_eval_qwen_lora.py
+    python scratch/03_eval_qwen.py             # full eval (100 items, resume si déjà fait)
+    MAX_ITEMS=7 python scratch/03_eval_qwen.py # smoke test
+    FORCE_REDO=1 python scratch/03_eval_qwen.py # ignore les logs précédents
 
-Logs cibles : `scratch/eval_logs_<EVAL_TAG>/<item_id>.json`. Si EVAL_TAG n'est
-pas fourni, on dérive un tag du nom du checkpoint LoRA (par ex. `checkpoint-10`).
+Mode resume (par défaut) : si un item a déjà un log valide dans
+`scratch/eval_logs/<item_id>.json`, on le charge au lieu de refaire le
+rollout. Pratique pour reprendre après une interruption (préemption Spot,
+SIGTERM volontaire, etc.) ou pour ne réévaluer qu'un sous-ensemble. Mettre
+`FORCE_REDO=1` pour tout recalculer.
+
+Métrique « Pass@1 » en fin de script : **une trajectoire indépendante par
+problème du test set** (k=1 essai / item), pas « un seul tour LLM↔env ».
+Chaque épisode peut aller jusqu'à ``MAX_ROUNDS`` (30) interactions, comme
+dans le setup papier TextCraft. Pour un pass@k d'éval avec k>1, il faudrait
+k rollouts distincts par ``item_id`` (non implémenté ici).
 """
 
 from __future__ import annotations
@@ -35,37 +48,20 @@ from pathlib import Path
 from agentenv.envs import TextCraftEnvClient
 from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
-from vllm.lora.request import LoRARequest
 
 
 REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
-MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
-DATASET_PATH = REPO_ROOT / "AgentEval" / "eval" / "textcraft_test.json"
+MODEL_PATH = Path(os.environ.get("MODEL_PATH", str(REPO_ROOT / "models" / "Qwen2.5-3B-Instruct")))
+DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
+LOG_DIR = Path(os.environ.get("EVAL_LOG_DIR", str(REPO_ROOT / "runs" / "exp1_baseline" / "eval_logs")))
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 MAX_ROUNDS = 30
-MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "0"))
+MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "0"))  # 0 = tout
 FORCE_REDO = bool(int(os.environ.get("FORCE_REDO", "0")))
 
-# LoRA-specific config — required.
-_lora_path_str = os.environ.get("LORA_PATH")
-if not _lora_path_str:
-    raise SystemExit(
-        "[eval-lora] LORA_PATH env var is required, "
-        "e.g. saves/trl_grpo/trl_grpo_rolloutfunc_v2_step10/checkpoint-10"
-    )
-LORA_PATH = (REPO_ROOT / _lora_path_str).resolve() if not Path(_lora_path_str).is_absolute() else Path(_lora_path_str)
-if not (LORA_PATH / "adapter_config.json").exists():
-    raise SystemExit(f"[eval-lora] {LORA_PATH} does not look like a peft LoRA dir (missing adapter_config.json)")
-
-EVAL_TAG = os.environ.get("EVAL_TAG") or LORA_PATH.name
-LOG_DIR = REPO_ROOT / "scratch" / f"eval_logs_{EVAL_TAG}"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
-
 SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-
-# vLLM LoRARequest: (lora_name, lora_int_id, lora_local_path).
-LORA_REQUEST = LoRARequest("textcraft_lora", 1, str(LORA_PATH))
 
 
 @dataclass
@@ -80,6 +76,7 @@ class EpisodeResult:
 
 
 def build_initial_messages(client: TextCraftEnvClient) -> list[dict]:
+    """Compose [system, user(rules), assistant(ack), user(initial_obs)]."""
     rules_msg = client.conversation_start[0]["value"]
     ack_msg = client.conversation_start[1]["value"]
     initial_obs = client.observe()
@@ -92,6 +89,7 @@ def build_initial_messages(client: TextCraftEnvClient) -> list[dict]:
 
 
 def item_id_to_idx(item_id: str) -> int:
+    """'textcraft_42' -> 42."""
     m = re.search(r"(\d+)$", item_id)
     if not m:
         raise ValueError(f"Cannot parse item_id: {item_id!r}")
@@ -119,9 +117,7 @@ def run_episode(
         prompt = tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        outputs = llm.generate(
-            [prompt], sampling, use_tqdm=False, lora_request=LORA_REQUEST
-        )
+        outputs = llm.generate([prompt], sampling, use_tqdm=False)
         assistant_text = outputs[0].outputs[0].text
         messages.append({"role": "assistant", "content": assistant_text})
 
@@ -153,7 +149,6 @@ def write_episode_log(result: EpisodeResult) -> None:
         "done": result.done,
         "rounds": result.rounds,
         "duration_s": round(result.duration_s, 2),
-        "lora_path": str(LORA_PATH),
         "transcript": result.transcript,
     }
     with fp.open("w") as f:
@@ -161,6 +156,7 @@ def write_episode_log(result: EpisodeResult) -> None:
 
 
 def load_existing_log(item_id: str) -> EpisodeResult | None:
+    """Charge un log précédent si présent et valide ; sinon None (=> à rerun)."""
     fp = LOG_DIR / f"{item_id}.json"
     if not fp.exists():
         return None
@@ -184,10 +180,6 @@ def load_existing_log(item_id: str) -> EpisodeResult | None:
 
 
 def main() -> None:
-    print(f"[eval-lora] LORA_PATH = {LORA_PATH}")
-    print(f"[eval-lora] EVAL_TAG  = {EVAL_TAG}")
-    print(f"[eval-lora] LOG_DIR   = {LOG_DIR}")
-
     with DATASET_PATH.open() as f:
         items = json.load(f)
     if MAX_ITEMS > 0:
@@ -203,28 +195,22 @@ def main() -> None:
             todo.append(it)
 
     print(
-        f"[eval-lora] {len(items)} total items. "
+        f"[eval] {len(items)} total items. "
         f"{len(cached)} cached (skipped), {len(todo)} to run."
     )
 
     new_results: list[EpisodeResult] = []
     if todo:
-        print("[eval-lora] Loading vLLM with LoRA support (this takes ~10-30s)...")
-        # NOTE: enforce_eager=False is intentional. With LoRA enabled, vLLM's
-        # Punica kernels go through a Python dispatch that is ~100x slower in
-        # eager mode. Letting vLLM compile CUDA graphs masks this overhead.
+        print("[eval] Loading vLLM (this takes ~10-30s)...")
         llm = LLM(
             model=str(MODEL_PATH),
-            enforce_eager=False,
+            enforce_eager=True,
             gpu_memory_utilization=0.85,
             max_model_len=16384,
             dtype="bfloat16",
             load_format="safetensors",
             tensor_parallel_size=1,
             enable_prefix_caching=True,
-            enable_lora=True,
-            max_lora_rank=16,
-            max_loras=1,
         )
         tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH))
         sampling = SamplingParams(temperature=1.0, top_p=1.0, max_tokens=512)
@@ -232,7 +218,7 @@ def main() -> None:
         client = TextCraftEnvClient(
             env_server_base=ENV_SERVER_URL, data_len=len(todo), timeout=60
         )
-        print(f"[eval-lora] Connected to env server (env_id={client.env_id}).")
+        print(f"[eval] Connected to env server (env_id={client.env_id}).")
 
         overall_t0 = time.time()
         for i, item in enumerate(todo):
@@ -240,27 +226,26 @@ def main() -> None:
             try:
                 r = run_episode(llm, tokenizer, client, sampling, item_id)
             except Exception as e:
-                print(f"[eval-lora][{i+1}/{len(todo)}] {item_id} CRASHED: {e}")
+                print(f"[eval][{i+1}/{len(todo)}] {item_id} CRASHED: {e}")
                 continue
             write_episode_log(r)
             status = "DONE" if r.done else "TIMEOUT"
             print(
-                f"[eval-lora][{i+1}/{len(todo)}] {item_id} reward={r.reward} "
+                f"[eval][{i+1}/{len(todo)}] {item_id} reward={r.reward} "
                 f"rounds={r.rounds} dur={r.duration_s:.1f}s [{status}]"
             )
             new_results.append(r)
-        print(f"\n[eval-lora] Wall time on new rollouts: {time.time() - overall_t0:.1f}s")
+        print(f"\n[eval] Wall time on new rollouts: {time.time() - overall_t0:.1f}s")
 
     all_results = cached + new_results
     if not all_results:
-        print("[eval-lora] No results to summarize.")
+        print("[eval] No results to summarize.")
         return
     avg_reward = sum(r.reward for r in all_results) / len(all_results)
     pass_rate = sum(1 for r in all_results if r.reward > 0) / len(all_results)
     print("=" * 50)
     print(f"GLOBAL STATS over {len(all_results)} items")
     print(f"  ({len(cached)} cached + {len(new_results)} fresh)")
-    print(f"  LoRA: {LORA_PATH.name}")
     print("=" * 50)
     print(f"Avg@1   = {avg_reward:.4f}")
     print(f"Pass@1  = {pass_rate:.4f}  ({sum(1 for r in all_results if r.reward > 0)}/{len(all_results)})")

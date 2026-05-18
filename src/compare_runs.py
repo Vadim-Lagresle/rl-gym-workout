@@ -16,13 +16,12 @@ import json
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-LOG_BASE = REPO_ROOT / "scratch"
 
 VARIANTS = {
-    "baseline":  LOG_BASE / "eval_logs",
-    "step10_v2": LOG_BASE / "eval_logs_step10",
-    "step50_v2": LOG_BASE / "eval_logs_step50",
-    "step50_v3": LOG_BASE / "eval_logs_step50_v3",
+    "baseline":  REPO_ROOT / "runs" / "exp1_baseline" / "eval_logs",
+    "step10_v2": REPO_ROOT / "runs" / "exp2_grpo_v2" / "eval_logs_step10",
+    "step50_v2": REPO_ROOT / "runs" / "exp2_grpo_v2" / "eval_logs_step50",
+    "step50_v3": REPO_ROOT / "runs" / "exp3_grpo_v3" / "eval_logs_step50",
 }
 
 

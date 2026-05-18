@@ -25,5 +25,5 @@ echo "[auto-eval] training process exited at $(date -Iseconds), waiting 30s for 
 sleep 30
 
 cd "$REPO_ROOT"
-bash examples/eval/textcraft_eval.4gpu_ckpt.sh 2>&1 | tee /tmp/eval_summary.txt
+bash external/agentgym_rl_paper/eval/textcraft_eval.4gpu_ckpt.sh 2>&1 | tee /tmp/eval_summary.txt
 echo "[auto-eval] done at $(date -Iseconds)"

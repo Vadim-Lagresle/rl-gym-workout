@@ -1,0 +1,48 @@
+name: verl_4gpu
+date: 2026-05-12
+description: >
+  Première réplication de la recette papier AgentGym-RL avec le framework verl
+  (full FT + FSDP, N=8, rounds=30). Hardware : 4× A100 40 GB single-node.
+  50 steps = ~1 epoch (vs ~12.5 epochs pour le checkpoint du papier).
+
+algorithm: GRPO (verl upstream, PPO loop)
+model: Qwen2.5-3B-Instruct
+script: external/agentgym_rl_paper/train/AgentGym-RL/textcraft_train.4gpu.sh
+
+training:
+  fine_tuning: Full FT (FSDP sharding)
+  train_batch_size: 8   # papier=32, contraint par VRAM 40GB
+  num_generations: 8    # aligné papier
+  max_response_length: 4096  # papier=10240, contraint par VRAM
+  max_tokens_per_turn: 512
+  rounds: 30
+  learning_rate: 1e-6
+  kl_loss_coef: 0.001
+  ppo_epochs: 2
+  gradient_checkpointing: true
+  optimizer_offload_cpu: true
+  gpu_memory_utilization: 0.4
+  steps: 50
+
+workarounds:
+  - "NCCL gIB GCP image → unset IB vars + NCCL_NET=Socket"
+  - "load_format=dummy_dtensor (pas safetensors dans verl vLLM fork)"
+  - "gradient_checkpointing + optimizer CPU offload pour tenir en 40 GB"
+
+results:
+  step50:
+    pass_at_1: "38/100 (38%)"
+    mean_rounds: 21.2
+    wall_time: "~2h40 (somme timing_s/step sur 49 steps)"
+    eval_logs: eval_logs_step50/
+  by_depth:
+    depth1: "27/31 (87%)"
+    depth2: "10/41 (24%)"
+    depth3: "1/25 (4%)"
+    depth4: "0/3 (0%)"
+
+gap_vs_paper: >
+  Papier atteint 75/100 à step ~150 (~12.5 epochs). Nous : 50 steps ≈ 1 epoch,
+  400 queries vs 4800 (12× moins). Max_response_length=4096 tronque les épisodes
+  à ~8 tours pendant le training → pas de signal gradient sur depth 2+.
+  Pour atteindre 75 : ~300-360 steps ≈ 28h sur ce hardware.
