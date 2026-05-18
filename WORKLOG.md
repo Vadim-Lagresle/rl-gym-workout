@@ -1334,3 +1334,11 @@ après les 3 fixes ci-dessus. Aucune modification du code Python verl.
 - **49 lignes** `step:N` parsées pour les courbes (steps 1–49 ; checkpoint `global_step_50` sauvegardé à la fin).
 - Somme des `timing_s/step` sur ces lignes ≈ **9617 s** (~2 h 40) de steps chronométrés ; wall-clock total training plus élevé (init Ray, checkpoints). Voir `saves/agentgym_rl_4gpu/agentgym_rl_qwen3b_4gpu_fixed_20260513_0941_a2a5b6d/run.log` sur la VM.
 
+---
+
+## TODO prochaine session training
+
+- [ ] **Ablation LoRA vs full FT** : lancer un run LoRA (r=16) avec exactement les mêmes hyperparamètres que Exp 6 (N=8, batch=8, max_response_length=4096, 4× A100) pour isoler proprement l'effet du fine-tuning method. Si LoRA atteint le même Pass@1 → les optimizer states libérés (~10-12 Go/GPU) peuvent être réinvestis en `max_response_length` plus grand (8192 voire 10240) et `max_model_len` plus grand. Si LoRA rate → confirme que full FT est nécessaire pour cette tâche.
+- [ ] **Augmenter `max_response_length`** : passer de 4096 à 8192 dans `textcraft_train.4gpu.sh`. Les épisodes depth-2 qui nécessitent >8 tours étaient tronqués pendant le training → pas de signal de reward → le modèle n'apprend pas à chaîner les crafts intermédiaires. C'est probablement la cause principale du gap depth-2 (24% vs 90%).
+- [ ] **Continuer Exp 6 jusqu'à ~200 steps** pour voir si la courbe converge vers 75/100 (papier). À 50 steps on a vu seulement 400 queries vs 4800 au checkpoint d'éval du papier (step 150).
+
