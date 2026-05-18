@@ -405,6 +405,100 @@ le **75/100** papier (moins de steps, `train_batch_size` réduit, `max_response_
 
 ---
 
+### Analyse des résultats Exp 6 par profondeur de crafting (session 2026-05-18)
+
+Le test set TextCraft (100 items) contient des problèmes de 4 niveaux de
+difficulté (« depth ») déterminés par la profondeur minimale dans l'arbre de
+crafting Minecraft. La distribution est : **31 items depth 1, 41 depth 2,
+25 depth 3, 3 depth 4** (vérifiée via `agentenv_textcraft.CraftingTree.item_recipes_min_depth`).
+
+#### Résultats par depth — Exp 6 vs papier AgentGym-RL-3B
+
+| Depth | Items | Nos succès | Notre taux | Papier 3B | Écart |
+|---|---|---|---|---|---|
+| 1 | 31 | 27 | **87.1 %** | 100 % | −13 % |
+| 2 | 41 | 10 | **24.4 %** | 90.2 % | −66 % |
+| 3 | 25 | 1 | **4.0 %** | 28.0 % | −24 % |
+| 4 | 3 | 0 | **0.0 %** | 0.0 % | = |
+| **Total** | **100** | **38** | **38.0 %** | **75.0 %** | **−37 %** |
+
+Vérification : 31×1.00 + 41×0.902 + 25×0.28 + 3×0 = 75 ✅ (cohérent avec Table 3 papier).
+
+Depth 4 : **mur universel**. Même GPT-4o, o3, o4-mini font 0/100. Seuls
+Gemini-2.5-Pro, Qwen3-8B/32B et ScalingInter-7B passent 1 item sur 3
+(33.33 %). Les 3 items depth 4 du test set sont : `polished_granite_slab`,
+`polished_andesite_stairs`, `lodestone`.
+
+#### Gap hardware — pourquoi 38 et non 75
+
+Le train set contient **374 items**. Avec `train_batch_size=8`, une epoch
+= ceil(374/8) ≈ 47 steps. Nos **50 steps ≈ 1 epoch**. Le papier fait
+`total_epochs=30` avec `train_batch_size=32` → 30 × ceil(374/32) ≈ **360
+steps ≈ 30 epochs**. L'évaluation du papier est au checkpoint `global_step_150`
+≈ **12.5 epochs**. Résumé :
+
+| | Papier (ckpt éval step 150) | Nous (50 steps) |
+|---|---|---|
+| Epochs vues | ~12.5 | ~1 |
+| Queries totales | 150 × 32 = **4 800** | 50 × 8 = **400** |
+| Ratio | **12× plus** | — |
+
+En plus de l'exposition data, deux contraintes matérielles dégradent la
+qualité d'apprentissage par step :
+
+- **`max_response_length=4096`** (vs 10240 papier) : 4096 ÷ 512 tokens/tour
+  ≈ **~8 tours max par épisode pendant le training**. Les items depth 2+
+  qui nécessitent 10-20 tours n'ont jamais produit de reward positif pendant
+  l'entraînement → pas de signal de gradient sur ces trajectoires.
+- **`max_model_len=8192`** (vs 32768 papier eval) : les conversations longues
+  sont tronquées en KV-cache dès 8192 tokens total, soit ~16 tours × 512
+  tokens. Impacte les épisodes qui vont au bout du timeout (30 tours).
+
+#### Patterns d'échec identifiés par analyse des logs (session 2026-05-18)
+
+Quatre logs examinés manuellement :
+`textcraft_0` (depth 1 ✅), `textcraft_12` (depth 1 ✗),
+`textcraft_173` (depth 2 ✅), `textcraft_140` (depth 2 ✗).
+
+**Pattern 1 — Distraction par recettes alternatives (depth 1)**
+Exemple : `textcraft_12`, goal = `sugar`. Le modèle a obtenu `1 sugar_cane`
+dès le tour 1 (recette directe disponible : `craft 1 sugar using 1 sugar_cane`),
+mais a ignoré cette recette au profit d'une alternative visible dans le
+contexte (`craft 3 sugar using 1 honey bottle`). Il a passé 28 tours à
+chercher une honey bottle introuvable, puis a halluciné des items inexistants
+(`mayonnaise_pancake`, `sweetcherry_jam`, `scallion_soup`) avant d'échouer.
+**Cause** : trop de recettes dans le contexte → le modèle choisit la mauvaise
+et ne revient pas sur ses pas même quand il possède déjà les ingrédients de
+la recette simple.
+
+**Pattern 2 — Absence de raisonnement transitif (depth 2+)**
+Exemple : `textcraft_140`, goal = `sandstone_stairs` (chemin : `4 sand →
+craft sandstone → craft 4 sandstone_stairs using 6 sandstone`). Le modèle
+a tenté `get 6 sandstone` → introuvable (normal : sandstone n'existe pas dans
+l'environnement, il doit être crafté). Face à l'échec, il n'a **jamais déduit**
+"sandstone est introuvable → je dois le crafter depuis sand". Il a cherché de
+la `purple_dye` et `white_dye` sans rapport, tenté des recettes invalides
+(`craft 4 cut sandstone using 4 sand`), et n'a jamais essayé
+`craft 1 sandstone using 4 sand` malgré du sable dans son inventaire.
+**Cause** : le modèle ne fait pas le lien entre "item introuvable par `get`"
+et "item qui doit être crafté depuis ses constituants". Ce raisonnement
+transitif est exactement ce qui est requis à depth 2, 3 et 4.
+
+**Pattern 3 — Hallucination d'items inexistants (après ~15 tours d'échec)**
+Quand le modèle est bloqué depuis de nombreux tours, il commence à inventer
+des items (`mayonnaisepancake`, `scallionsoup`, etc.) qui ne figurent pas dans
+les recettes fournies. Signe d'effondrement du raisonnement sous contrainte
+d'horizon long.
+
+**Succès depth 2 — contre-exemple positif**
+`textcraft_173`, goal = `light_gray_stained_glass` (chemin : `get glass →
+light_gray_dye introuvable → get azure_bluet → craft light_gray_dye →
+craft stained_glass`). Le modèle a correctement identifié qu'il manquait un
+précurseur, cherché la fleur qui produit le dye, et chaîné les deux crafts en
+5 tours. **C'est exactement le pattern depth-2 qu'il faut généraliser.**
+
+---
+
 ### (À venir) Exp 5 — Continued GRPO depuis v4, comparaison reward env vs reward SCPO
 
 **Objectif scientifique** : tester si une "self-consistency reward" basée
