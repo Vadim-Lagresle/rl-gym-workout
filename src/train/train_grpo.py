@@ -14,18 +14,18 @@ Usage :
 """
 
 #Dependecies :
-from __future__ import annotations
+from __future__ import annotations # for Python 3.10+ type hinting, ie more flexible 
 
-import argparse
+import argparse 
 import json
 import os
 import re
 from pathlib import Path
 from typing import Any
 
-import requests
-from datasets import Dataset
-from transformers import AutoTokenizer
+import requests # HTTP client for env interaction in rollout_func
+from datasets import Dataset # transforms jsons into datasets for trl
+from transformers import AutoTokenizer # tokenizer of Qwen 2.5 3B
 from peft import LoraConfig
 from trl import GRPOConfig, GRPOTrainer
 
@@ -395,5 +395,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-    os.environ.setdefault("VLLM_ATTENTION_BACKEND", "XFORMERS")
     main()
