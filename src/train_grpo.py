@@ -293,6 +293,7 @@ def main() -> None:
             "=20 from step 38. Empty string keeps the fixed MAX_SIM_ROUNDS cap."
         ),
     )
+    parser.add_argument("--use-vllm", action="store_true", default=False)
     parser.add_argument(
         "--resume-from-checkpoint",
         type=str,
@@ -330,6 +331,7 @@ def main() -> None:
         # Explicit clip (default is also 1.0, but make intent clear after the
         # grad_norm=1765 spike at step 35 of v2 — see WORKLOG step50 anomaly).
         max_grad_norm=1.0,
+        use_vllm=args.use_vllm,
         max_steps=args.max_steps,
         num_generations=args.num_generations,
         generation_batch_size=2,
@@ -343,7 +345,7 @@ def main() -> None:
         save_total_limit=3,
         eval_strategy="no",
         gradient_checkpointing=True,
-        model_init_kwargs={"torch_dtype": "bfloat16", "low_cpu_mem_usage": True},
+        model_init_kwargs={"dtype": "bfloat16", "low_cpu_mem_usage": True},
     )
 
     peft_config = LoraConfig(
