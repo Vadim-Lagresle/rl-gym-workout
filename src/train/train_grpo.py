@@ -1,3 +1,17 @@
+"""Entraînement GRPO multi-tour sur TextCraft avec TRL.
+
+Implémente une boucle RL interactive : à chaque step GRPO, le modèle joue N
+épisodes complets (generate → env.step → observe → repeat) via textcraft_rollout_func,
+reçoit une récompense sparse 0/1 de l'environnement, et met à jour ses poids par GRPO.
+
+Pré-requis :
+  - Serveur TextCraft lancé : conda activate agentenv-textcraft &&
+    cd external/AgentGym/agentenv-textcraft && textcraft --host 127.0.0.1 --port 36005
+  - Env conda trl-b200 (B200) ou agentgym-rl (A100 sans vLLM)
+
+Usage :
+    python src/train/train_grpo.py --use-vllm --num-generations 8 --max-steps 200 --run-name exp7_b200
+"""
 from __future__ import annotations
 
 import argparse

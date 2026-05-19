@@ -52,8 +52,8 @@ rl-gym-workout/
 ```
 
 **Fichiers clés à connaître :**
-- `src/train_grpo.py` — script TRL GRPO (toutes les versions v2→v4)
-- `src/eval_baseline.py` / `src/eval_lora.py` — évaluation baseline et LoRA
+- `src/train/train_grpo.py` — script TRL GRPO (toutes les versions v2→v4)
+- `src/eval/eval_baseline.py` / `src/eval/eval_lora.py` — évaluation baseline et LoRA
 - `runs/expN_*/config.yaml` — config, hyperparamètres et résultats de chaque run
 - `external/USAGE.md` — quels fichiers on utilise dans les dépendances externes
 - `external/agentgym_rl_paper/train/AgentGym-RL/textcraft_train.4gpu.sh` — script training verl 4-GPU

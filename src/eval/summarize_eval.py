@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-Agrège les logs `textcraft_*.json` produits par `scratch/03_eval_qwen.py`
-dans un répertoire donné (ex. `scratch/eval_logs_4gpu_global_step_50/`).
+Agrège les logs textcraft_*.json d'un répertoire d'éval en deux fichiers de synthèse.
 
-Écrit :
-  - scores_table.csv — une ligne par item (success, reward, rounds, …)
-  - scores_summary.json — totaux et taux de réussite
+Écrit dans le répertoire cible :
+  - scores_table.csv    — une ligne par item (success, reward, rounds, …)
+  - scores_summary.json — totaux et taux de réussite global
 
 Usage :
-  python scratch/summarize_textcraft_eval_dir.py scratch/eval_logs_4gpu_global_step_50
+    python src/eval/summarize_eval.py runs/exp1_baseline/eval_logs
 """
 from __future__ import annotations
 

@@ -1,13 +1,11 @@
-"""Compare Pass@1 of four TextCraft eval runs on the same 100 items.
+"""Compare Pass@1 de plusieurs runs TextCraft sur les mêmes 100 items.
 
-Variants:
-  - baseline    -> scratch/eval_logs
-  - LoRA step10 -> scratch/eval_logs_step10
-  - LoRA step50 -> scratch/eval_logs_step50  (v2)
-  - LoRA step50 -> scratch/eval_logs_step50_v3 (v3, with reward shaping fix)
+Lit les répertoires eval_logs de chaque expérience (définis dans VARIANTS),
+calcule le taux de succès par run et par profondeur d'item, et affiche un
+tableau comparatif. Ajouter un nouveau run = ajouter une entrée dans VARIANTS.
 
-Usage:
-    python scratch/09_compare_4way.py
+Usage :
+    python src/eval/compare_runs.py
 """
 
 from __future__ import annotations

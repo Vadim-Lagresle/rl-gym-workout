@@ -1,20 +1,14 @@
 #!/usr/bin/env python3
 """
-Parse un run.log de `verl.agent_trainer.main_ppo` et plot les courbes
-clés en PNG.
+Parse les logs d'un run verl (Exp 6, 4 GPU) et trace les courbes d'entraînement.
 
-Le trainer émet à chaque step une ligne du type
-    step:N - key1:v1 - key2:v2 - ...
-(préfixée par les logs Ray colorés `(main_task pid=X)`). On extrait
-toutes les paires key:value flottantes pour chaque step et on plot les
-8 métriques les plus utiles pour suivre un training GRPO multi-tour.
+Spécifique au format de log de verl.agent_trainer.main_ppo (lignes "step:N - key:v").
+Pour les runs TRL (train_grpo.py), utiliser les logs W&B ou les logs HuggingFace Trainer.
 
 Usage :
-    python scratch/plot_training_curves.py [LOG_PATH] [--out PNG] [--loss-out PNG]
+    python src/eval/plot_curves.py [LOG_PATH] [--out PNG] [--loss-out PNG]
 
-Si LOG_PATH n'est pas donné, on prend le run.log le plus récent dans
-saves/agentgym_rl_4gpu/. Par défaut deux PNG : vue d'ensemble + panneau
-« losses » acteur (pg / kl / entropy / grad_norm).
+Si LOG_PATH n'est pas donné, prend le run.log le plus récent dans saves/agentgym_rl_4gpu/.
 """
 from __future__ import annotations
 

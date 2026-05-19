@@ -1,11 +1,12 @@
-"""Analyse qualitative des 100 logs d'eval Qwen-3B sur TextCraft.
+"""Analyse qualitative des logs d'éval TextCraft.
 
-Catégorise les échecs et sort des stats globales pour comprendre
-*pourquoi* le modèle échoue, afin d'orienter le design RL futur.
+Catégorise les échecs (action invalide, timeout, mauvais item...) et sort des
+stats par profondeur pour comprendre *pourquoi* le modèle échoue. Utile après
+chaque éval pour orienter les décisions de design RL.
 
-Lancement (depuis env conda agentgym-rl, ou n'importe quel python3) :
-    python scratch/04_analyze_eval.py
-    python scratch/04_analyze_eval.py --examples  # affiche 2-3 transcripts
+Usage :
+    python src/eval/analyze_eval.py
+    python src/eval/analyze_eval.py --examples  # affiche 2-3 transcripts
 """
 
 from __future__ import annotations
