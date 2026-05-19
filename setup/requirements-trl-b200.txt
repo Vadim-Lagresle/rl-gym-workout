@@ -1,0 +1,47 @@
+# Environnement pour training TRL GRPO sur GPU single (B200 ou équivalent)
+# Sans verl — stack propre compatible TRL 1.3.0
+#
+# Installation complète :
+#   conda create -n trl-b200 python=3.10
+#   conda activate trl-b200
+#   pip install -r setup/requirements-trl-b200.txt
+#   pip install -e external/AgentGym/agentenv   # client HTTP TextCraft
+#
+# Le serveur TextCraft tourne séparément dans l'env agentenv-textcraft (inchangé).
+# Démarrage serveur : conda activate agentenv-textcraft && textcraft --host 127.0.0.1 --port 36005
+
+# --- PyTorch (adapter cu124 / cu126 selon driver GPU) ---
+# Sur B200 avec driver récent, préférer cu126 :
+#   pip install torch>=2.5.0 --index-url https://download.pytorch.org/whl/cu126
+# Sur A100 cu124 :
+#   pip install torch>=2.5.0 --index-url https://download.pytorch.org/whl/cu124
+torch>=2.5.0
+
+# --- LLM stack ---
+transformers>=4.56.2
+tokenizers>=0.22.0
+accelerate>=0.23.0
+peft>=0.14.0
+datasets>=2.18.0
+
+# --- RL training ---
+trl>=1.3.0
+
+# --- Génération rapide (vLLM standard, PAS le fork verl) ---
+# Doit être >= 0.12.0 pour compatibilité TRL 1.3.0
+vllm>=0.12.0
+
+# --- Dépendances agentenv (client TextCraft) ---
+# agentenv lui-même s'installe en editable (voir ci-dessus)
+# Ses dépendances déclarées :
+scipy>=1.11.4
+jsonlines>=4.0.0
+wandb>=0.16.4
+tensorboard>=2.17.1
+deepspeed>0.15.0
+openai
+
+# --- Utilitaires ---
+requests
+matplotlib
+pandas
