@@ -1387,6 +1387,115 @@ Le `.gitignore` existant couvre déjà tout correctement :
 
 ---
 
+## Session 2026-05-19 — Analyse du dataset TextCraft et propositions d'expériences
+
+### Analyse de la structure du dataset TextCraft
+
+#### Mapping index → depth (correction d'une erreur précédente)
+
+Le fichier `data/eval/textcraft_test.json` contient des `item_id` de la forme `textcraft_N`.
+L'index `N` est la position dans la liste `item_recipes_min_depth(1)` triée par depth
+(cf. `external/AgentGym/agentenv-textcraft/agentenv_textcraft/environment.py` ligne 166-168).
+Les items depth 0 (matières premières) sont **exclus par design** du jeu.
+
+Distribution réelle du jeu TextCraft (544 items craftables, depth ≥ 1) :
+
+| Depth | Total jeu | Train (374) | Test (100) | Exclus |
+|---|---|---|---|---|
+| 1 | 124 | 93 | 31 | 0 |
+| 2 | 292 | 233 | 41 | 18 |
+| 3 | 117 | 47 | 25 | 45 |
+| 4 | 11 | 1 | 3 | 7 |
+| **Total** | **544** | **374** | **100** | **70** |
+
+**Notre test set = le test set du papier** (31/41/25/3 = 100 ✓, vérifié par reverse-engineering
+des scores Table 3 : GPT-4o 100%/87.8%/64%/0%/83% → N1=31, N2=41, N3=25, N4=3).
+
+La différence baseline 18/100 (nous) vs 14/100 (papier) est de la variance stochastique
+à temperature=1, pas un écart de dataset.
+
+#### Les 11 items depth 4 et leur statut
+
+| Statut | idx | Item | Structure de la recette |
+|---|---|---|---|
+| TEST | 533 | polished_granite_slab | granite → poli → dalle |
+| TEST | 534 | polished_andesite_stairs | andesite → poli → escaliers |
+| TEST | 535 | lodestone | chiseled_stone → netherite → lodestone |
+| **EXCLU** | 536 | purple_banner | laine_colorée(dye chain) + bâton |
+| TRAIN | 537 | lectern | bookshelf(paper+leather) + wooden_slabs |
+| **EXCLU** | 538 | polished_granite_stairs | granite → poli → escaliers |
+| **EXCLU** | 539 | polished_andesite_slab | andesite → poli → dalle |
+| **EXCLU** | 540 | cyan_banner | laine_colorée(dye chain) + bâton |
+| **EXCLU** | 541 | gray_banner | laine_colorée(dye chain) + bâton |
+| **EXCLU** | 542 | lime_banner | laine_colorée(dye chain) + bâton |
+| **EXCLU** | 543 | hopper_minecart | hopper(chest+iron) + minecart(iron) |
+
+Les 7 exclus sont des coupures de la fenêtre du split (séquentiel par index).
+4 d'entre eux sont des banners structurellement quasi-identiques.
+
+#### Contrainte de comparabilité avec le papier
+
+La seule contrainte pour être comparable au papier est de **ne pas entraîner sur les 100 items
+du test set**. Le train set est entièrement libre. Les 444 items non-test (dont les 7 exclus
+depth 4) peuvent tous être utilisés pour l'entraînement.
+
+TextCraft implémente 860 fichiers de recettes Minecraft (crafting table uniquement —
+pas de fourneau, pas de brassage). Ce sont de vraies recettes Minecraft, pas des simplifications.
+
+---
+
+### Expérience proposée A — Full TextCraft training (444 items)
+
+**Idée** : remplacer le train set actuel (374 items) par tous les 444 items non-test.
+Gain principal : 8 exemples depth 4 en training au lieu de 1 (×8).
+
+**Ce qui change** :
+- Générer un nouveau `data/train/textcraft_train_full.json` avec les 444 IDs non-test
+  (items 0–532 hors test, + items 536, 538–543)
+- Passer `--max-items 444` (ou pointer sur le nouveau fichier)
+- Test set inchangé → résultats directement comparables au papier
+
+**Intérêt** :
+- Coût nul (même jeu, même serveur)
+- Isole proprement l'effet de la couverture depth 4 en training
+- Espérance : le modèle voit 8× plus de chaînes depth 4 → devrait progresser sur les
+  3 items test depth 4 (actuellement 0/3 même pour AgentGym-RL-3B)
+
+**Risque** : faible. Les 7 items exclus sont structurellement similaires aux items existants
+(banners = même structure dye chain). Le modèle aura vu des patterns très proches.
+
+---
+
+### Expérience proposée B — Génération synthétique de recettes (style SCPO)
+
+**Idée** : créer de nouvelles recettes inventées pour augmenter artificiellement la densité
+d'exemples depth 4+ en training, sans toucher au test set.
+
+**Principe** (inspiré de SCPO — Self-play with Critic-driven Policy Optimization) :
+1. Générer des arbres de recettes synthétiques en combinant des items existants :
+   `synthetic_item_A = lectern + hopper` (depth 5),
+   `synthetic_item_B = lodestone + polished_granite_stairs` (depth 6), etc.
+2. Ajouter ces recettes comme fichiers JSON dans `agentenv_textcraft/recipes/`
+3. Le serveur TextCraft les charge automatiquement (CraftingTree parse tous les JSON)
+4. Entraîner sur ces items synthétiques + les 444 items réels
+
+**Intérêt** :
+- Contrôle total sur la difficulté : on peut créer des recettes depth 5, 6, 7...
+- Potentiellement utile pour le curriculum (ScalingInter sur des depths qu'on contrôle)
+- Direction de recherche originale, pas dans le papier
+
+**Risques** :
+- Recettes synthétiques peut-être mal formées (cycles, items inaccessibles)
+- Distribution shift : le modèle s'entraîne sur des items "non-Minecraft" → effet sur
+  la généralisation incertain
+- Engineering non trivial : il faut valider que CraftingTree accepte les nouvelles recettes
+  et que le serveur les résout correctement
+
+**Ordre de priorité** : faire A d'abord (gain certain, coût nul), puis B si A donne des
+résultats mais que depth 4 reste bloqué à 0/3.
+
+---
+
 ## TODO prochaine session training
 
 - [ ] **Ablation LoRA vs full FT** : lancer un run LoRA (r=16) avec exactement les mêmes hyperparamètres que Exp 6 (N=8, batch=8, max_response_length=4096, 4× A100) pour isoler proprement l'effet du fine-tuning method. Si LoRA atteint le même Pass@1 → les optimizer states libérés (~10-12 Go/GPU) peuvent être réinvestis en `max_response_length` plus grand (8192 voire 10240) et `max_model_len` plus grand. Si LoRA rate → confirme que full FT est nécessaire pour cette tâche.
