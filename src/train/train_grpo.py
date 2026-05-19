@@ -12,6 +12,8 @@ Pré-requis :
 Usage :
     python src/train/train_grpo.py --use-vllm --num-generations 8 --max-steps 200 --run-name exp7_b200
 """
+
+#Dependecies :
 from __future__ import annotations
 
 import argparse
@@ -29,11 +31,16 @@ from trl import GRPOConfig, GRPOTrainer
 
 from agentenv.envs import TextCraftEnvClient
 
+
+
+# Paths
 REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
 MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
 TRAIN_PATH = REPO_ROOT / "data" / "train" / "textcraft_train.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 
+
+# Constants and utils for the interactive rollout and reward shaping.
 SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 MAX_SIM_ROUNDS = 20  # default cap when no curriculum is given
 ITEM_TAG_RE = re.compile(r"^<ITEM_IDX:(\d+)>$")
