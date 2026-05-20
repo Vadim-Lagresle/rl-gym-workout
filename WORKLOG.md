@@ -1496,6 +1496,83 @@ résultats mais que depth 4 reste bloqué à 0/3.
 
 ---
 
+---
+
+## Session 2026-05-20 — Eval Gemini 3.5 Flash sur TextCraft + scripts eval API externes
+
+### Objectif
+
+Mesurer les performances d'un modèle SOTA propriétaire (Gemini 3.5 Flash) sur TextCraft
+sans fine-tuning, pour fixer une borne supérieure pratique. Créer une infrastructure
+d'évaluation réutilisable pour tout modèle API (Kimi, DeepSeek, OpenAI, etc.).
+
+### Nouveaux fichiers
+
+| Fichier | Rôle |
+|---|---|
+| `src/eval/eval_gemini.py` | Eval multi-tours via API Google Gemini (google-genai) |
+| `src/eval/eval_openai_compat.py` | Eval générique pour toute API OpenAI-compatible |
+| `src/eval/analyze_gemini.py` | Rapport par depth + comparaison baseline |
+| `runs/exp_gemini_baseline/config.yaml` | Config expérience Gemini |
+| `runs/exp_gemini_gemini_3_5_flash/` | Logs épisodes (100 JSON) |
+| `runs/exp_kimi_k2_6/config.yaml` | Config Kimi K2.6 (noms API à vérifier) |
+| `runs/exp_deepseek_v4_pro_max/config.yaml` | Config DeepSeek V4 Pro Max (noms API à vérifier) |
+
+### Résultats Gemini 3.5 Flash
+
+```
+Depth    Items  Solved  Pass@1   Rds moy   Dur moy
+depth 1     31      31  100.0%       5.6      30.2s
+depth 2     41      41  100.0%       8.3      49.6s
+depth 3     25      24   96.0%      15.6      81.9s
+depth 4      3       3  100.0%      26.0     140.0s
+TOTAL      100      99   99.0%
+```
+
+| Modèle | Pass@1 | depth 3 | depth 4 |
+|---|---|---|---|
+| Gemini 3.5 Flash (0 training) | **99%** | 96% | 100% |
+| AgentGym-RL paper (Qwen 3B full FT, N=8) | 75% | ~64% | ~33% |
+| Qwen 2.5-3B baseline (0 training) | 18% | 0% | 0% |
+
+**Gemini 3.5 Flash écrase le papier de référence** (99% vs 75%). Sert de borne
+supérieure — confirme que TextCraft est quasi-entièrement résolvable par un grand modèle.
+
+### Analyse de l'unique échec (textcraft_422, depth 3)
+
+Item : `minecraft:pink_banner` (recette : 6 pink_wool + 1 stick).
+Comportement : Gemini boucle indéfiniment sur `craft 1 pink_wool using 1 pink_dye, 1 white_wool`
+pendant les 30 tours sans jamais assembler le banner. Cause probable : perte de l'objectif
+final dans un contexte chargé (~60 messages) + manque de stick non détecté.
+Ce comportement "boucle sur sous-objectif" est identique à ce qu'on observe sur Qwen,
+mais Qwen le fait sur 25/25 items depth-3 vs 1/25 pour Gemini.
+
+### Problèmes techniques rencontrés
+
+1. **Quota free tier Gemini 3.5 Flash** : limite de 20 requêtes/jour. Résolu en activant
+   la facturation Google AI Studio (coût total ~quelques centimes pour 100 items).
+
+2. **503 UNAVAILABLE persistants** : Gemini 3.5 Flash venait de sortir et était surchargé.
+   Résolu en lançant une boucle de retry overnight (`while true; do ...; sleep 600; done`).
+   Les 503 se sont dissipés vers 19h UTC.
+
+3. **Timeout API Gemini** : sans timeout, certains appels pendaient indéfiniment (>20 min).
+   Fix : passer un client `httpx.Client(timeout=90.0)` au constructeur `genai.Client()` via
+   `http_options=genai_types.HttpOptions(httpx_client=httpx.Client(timeout=90.0))`.
+   Note : le champ `timeout=N` de `HttpOptions` est en millisecondes (N=90 → 90ms → trop court),
+   et ne peut pas être passé directement à `generate_content()`.
+
+### Pour lancer Kimi K2.6 / DeepSeek V4 Pro Max
+
+Les deux utilisent `src/eval/eval_openai_compat.py` (API OpenAI-compatible).
+Il faut : (1) une clé API, (2) vérifier le nom exact du modèle :
+```bash
+curl https://api.moonshot.cn/v1/models -H "Authorization: Bearer $API_KEY"   # Kimi
+curl https://api.deepseek.com/v1/models -H "Authorization: Bearer $API_KEY"  # DeepSeek
+```
+
+---
+
 ## TODO prochaine session training
 
 - [ ] **Ablation LoRA vs full FT** : lancer un run LoRA (r=16) avec exactement les mêmes hyperparamètres que Exp 6 (N=8, batch=8, max_response_length=4096, 4× A100) pour isoler proprement l'effet du fine-tuning method. Si LoRA atteint le même Pass@1 → les optimizer states libérés (~10-12 Go/GPU) peuvent être réinvestis en `max_response_length` plus grand (8192 voire 10240) et `max_model_len` plus grand. Si LoRA rate → confirme que full FT est nécessaire pour cette tâche.

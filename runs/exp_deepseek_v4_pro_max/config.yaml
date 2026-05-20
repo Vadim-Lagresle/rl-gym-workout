@@ -1,0 +1,34 @@
+name: deepseek_v4_pro_max_baseline
+date: 2026-05-20
+description: >
+  Évaluation de DeepSeek V4 Pro Max sur TextCraft via l'API OpenAI-compatible.
+  DeepSeek est un modèle open-weights très performant avec API cloud.
+
+algorithm: none (eval only, API calls)
+model: DeepSeek V4 Pro Max — nom API exact à vérifier sur platform.deepseek.com
+script: src/eval/eval_openai_compat.py
+
+env_vars:
+  API_BASE_URL: "https://api.deepseek.com/v1"
+  API_KEY: "requis — clé API DeepSeek (platform.deepseek.com)"
+  MODEL_NAME: "?? — lister les modèles : curl https://api.deepseek.com/v1/models -H 'Authorization: Bearer $API_KEY'"
+  MAX_ITEMS: "0 = tous les 100 items de test"
+  RPM_LIMIT: "60 (défaut, ajuster selon plan)"
+
+prerequisites:
+  - pip install openai
+  - Serveur TextCraft sur 127.0.0.1:36005
+  - Compte DeepSeek avec crédits (platform.deepseek.com)
+
+run_command: >
+  API_BASE_URL=https://api.deepseek.com/v1 API_KEY=xxx MODEL_NAME=<nom_exact_v4_pro_max>
+  python src/eval/eval_openai_compat.py
+
+result:
+  pass_at_1: "TBD"
+  eval_logs: eval_logs/
+
+notes: >
+  Le nom exact du modèle dans l'API DeepSeek est inconnu (ma connaissance s'arrête en 2025).
+  Lister les modèles disponibles avec la commande curl ci-dessus une fois la clé API obtenue.
+  L'API DeepSeek est OpenAI-compatible, aucune modification du script nécessaire.

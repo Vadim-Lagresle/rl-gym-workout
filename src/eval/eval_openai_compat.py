@@ -1,26 +1,35 @@
 """
-Évalue Gemini (Flash ou Pro) sur TextCraft via l'API Google Gemini.
+Évalue n'importe quel modèle exposant une API compatible OpenAI sur TextCraft.
 
-Même architecture que eval_baseline.py : épisodes multi-tours avec TextCraftEnvClient,
-logs JSON identiques, mode resume. Remplace vLLM par des appels à l'API Gemini.
+Fonctionne avec Kimi (Moonshot AI), DeepSeek, OpenAI, Mistral, etc.
+Même architecture que eval_gemini.py : épisodes multi-tours, logs JSON, resume.
 
 Pré-requis :
   1. Serveur TextCraft sur 127.0.0.1:36005.
-  2. Variable d'env GEMINI_API_KEY définie.
-  3. pip install google-genai
+  2. pip install openai
+  3. Variables d'env API_KEY et MODEL_NAME définies.
 
 Usage :
-    GEMINI_API_KEY=xxx python src/eval/eval_gemini.py
-    GEMINI_API_KEY=xxx MODEL_NAME=gemini-3.5-flash MAX_ITEMS=10 python src/eval/eval_gemini.py
-    GEMINI_API_KEY=xxx FORCE_REDO=1 python src/eval/eval_gemini.py
+    # Kimi K2
+    API_BASE_URL=https://api.moonshot.cn/v1 API_KEY=xxx MODEL_NAME=kimi-k2-0711-preview \\
+        python src/eval/eval_openai_compat.py
+
+    # DeepSeek
+    API_BASE_URL=https://api.deepseek.com/v1 API_KEY=xxx MODEL_NAME=deepseek-chat \\
+        python src/eval/eval_openai_compat.py
+
+    # Smoke test (5 items)
+    API_BASE_URL=... API_KEY=xxx MODEL_NAME=xxx MAX_ITEMS=5 python src/eval/eval_openai_compat.py
 
 Variables d'environnement :
-    GEMINI_API_KEY  — clé API Google (obligatoire)
-    MODEL_NAME      — modèle Gemini à évaluer (défaut : gemini-3.5-flash)
-    MAX_ITEMS       — tronque le dataset pour smoke test (0 = tous les 100 items)
-    FORCE_REDO      — ignore les logs existants si 1
-    EVAL_LOG_DIR    — dossier de sortie des logs (défaut : runs/exp_gemini_baseline/eval_logs)
-    RPM_LIMIT       — requests/minute max pour respecter les quotas API (défaut : 15)
+    API_BASE_URL  — endpoint de l'API (obligatoire)
+    API_KEY       — clé API (obligatoire)
+    MODEL_NAME    — nom du modèle à évaluer (obligatoire)
+    MAX_ITEMS     — tronque le dataset pour smoke test (0 = tous les 100 items)
+    FORCE_REDO    — ignore les logs existants si 1
+    EVAL_LOG_DIR  — dossier de sortie (défaut : runs/exp_{model_slug}/eval_logs)
+    RPM_LIMIT     — requests/minute max (défaut : 60)
+    MAX_TOKENS    — tokens max par réponse (défaut : 512)
 """
 
 from __future__ import annotations
@@ -35,19 +44,23 @@ from pathlib import Path
 from agentenv.envs import TextCraftEnvClient
 
 try:
-    import httpx
-    from google import genai
-    from google.genai import types as genai_types
+    from openai import OpenAI
 except ImportError:
-    raise ImportError("Installer google-genai et httpx : pip install google-genai httpx")
+    raise ImportError("Installer openai : pip install openai")
 
 
 REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 
-MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-3.5-flash")
+API_BASE_URL = os.environ.get("API_BASE_URL", "")
+API_KEY = os.environ.get("API_KEY", "")
+MODEL_NAME = os.environ.get("MODEL_NAME", "")
+
+# Slug pour le nom du dossier de logs (remplace les caractères spéciaux)
+MODEL_SLUG = re.sub(r"[^a-zA-Z0-9]", "_", MODEL_NAME)
+
 LOG_DIR = Path(os.environ.get("EVAL_LOG_DIR", str(
-    REPO_ROOT / "runs" / f"exp_gemini_{MODEL_NAME.replace('.', '_').replace('-', '_')}" / "eval_logs"
+    REPO_ROOT / "runs" / f"exp_{MODEL_SLUG}" / "eval_logs"
 )))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -55,10 +68,10 @@ ENV_SERVER_URL = "http://127.0.0.1:36005"
 MAX_ROUNDS = 30
 MAX_ITEMS = int(os.environ.get("MAX_ITEMS", "0"))
 FORCE_REDO = bool(int(os.environ.get("FORCE_REDO", "0")))
-RPM_LIMIT = int(os.environ.get("RPM_LIMIT", "15"))
+RPM_LIMIT = int(os.environ.get("RPM_LIMIT", "60"))
+MAX_TOKENS = int(os.environ.get("MAX_TOKENS", "512"))
 
-# Délai minimum entre appels API pour rester sous RPM_LIMIT
-MIN_CALL_INTERVAL = 60.0 / RPM_LIMIT  # secondes
+MIN_CALL_INTERVAL = 60.0 / RPM_LIMIT
 
 SYSTEM_PROMPT = (
     "You are a helpful assistant playing a crafting game. "
@@ -86,34 +99,32 @@ def item_id_to_idx(item_id: str) -> int:
     return int(m.group(1))
 
 
-def call_gemini_with_retry(
-    client: "genai.Client",
-    contents: list,
-    max_retries: int = 8,
+def call_api_with_retry(
+    client: OpenAI,
+    messages: list[dict],
+    max_retries: int = 5,
 ) -> str:
-    """Appelle l'API Gemini avec retry exponentiel sur les erreurs de rate limit."""
+    """Appelle l'API avec retry exponentiel sur les erreurs de rate limit et serveur."""
     delay = 2.0
     for attempt in range(max_retries):
         try:
-            response = client.models.generate_content(
+            response = client.chat.completions.create(
                 model=MODEL_NAME,
-                contents=contents,
-                config=genai_types.GenerateContentConfig(
-                    system_instruction=SYSTEM_PROMPT,
-                    temperature=1.0,
-                    max_output_tokens=512,
-                ),
+                messages=messages,
+                max_tokens=MAX_TOKENS,
+                temperature=1.0,
             )
-            return response.text or ""
+            return response.choices[0].message.content or ""
         except Exception as e:
             err = str(e).lower()
             is_retryable = (
-                "429" in err or "503" in err or "quota" in err
-                or "rate" in err or "unavailable" in err or "timeout" in err
+                "429" in err or "503" in err or "502" in err
+                or "quota" in err or "rate" in err or "unavailable" in err
+                or "overloaded" in err or "timeout" in err
             )
             if is_retryable and attempt < max_retries - 1:
                 wait = delay * (2 ** attempt)
-                print(f"  [retry] attente {wait:.1f}s (tentative {attempt+1})")
+                print(f"  [retry] attente {wait:.1f}s (tentative {attempt+1}): {str(e)[:80]}")
                 time.sleep(wait)
             else:
                 raise
@@ -121,7 +132,7 @@ def call_gemini_with_retry(
 
 
 def run_episode(
-    client: "genai.Client",
+    client: OpenAI,
     env_client: TextCraftEnvClient,
     item_id: str,
     last_call_time: list[float],
@@ -134,21 +145,14 @@ def run_episode(
     ack_msg = env_client.conversation_start[1]["value"]
     initial_obs = env_client.observe()
 
-    # Historique de conversation au format Gemini
-    # Note : le system prompt est passé séparément dans GenerateContentConfig
-    contents: list[genai_types.Content] = [
-        genai_types.Content(role="user",  parts=[genai_types.Part(text=rules_msg)]),
-        genai_types.Content(role="model", parts=[genai_types.Part(text=ack_msg)]),
-        genai_types.Content(role="user",  parts=[genai_types.Part(text=initial_obs)]),
-    ]
-
-    # Transcript humain-lisible (même format que eval_baseline.py)
-    transcript: list[dict] = [
+    # Historique au format OpenAI (system + user/assistant alternés)
+    messages: list[dict] = [
         {"role": "system",    "content": SYSTEM_PROMPT},
         {"role": "user",      "content": rules_msg},
         {"role": "assistant", "content": ack_msg},
         {"role": "user",      "content": initial_obs},
     ]
+    transcript = list(messages)
 
     t0 = time.time()
     reward = 0.0
@@ -158,26 +162,21 @@ def run_episode(
     for round_idx in range(max_rounds):
         rounds = round_idx + 1
 
-        # Respecter le rate limit
         elapsed = time.time() - last_call_time[0]
         if elapsed < MIN_CALL_INTERVAL:
             time.sleep(MIN_CALL_INTERVAL - elapsed)
 
-        assistant_text = call_gemini_with_retry(client, contents)
+        assistant_text = call_api_with_retry(client, messages)
         last_call_time[0] = time.time()
 
-        contents.append(genai_types.Content(
-            role="model", parts=[genai_types.Part(text=assistant_text)]
-        ))
+        messages.append({"role": "assistant", "content": assistant_text})
         transcript.append({"role": "assistant", "content": assistant_text})
 
         step_out = env_client.step(assistant_text)
         reward = float(step_out.reward)
         done = bool(step_out.done)
 
-        contents.append(genai_types.Content(
-            role="user", parts=[genai_types.Part(text=step_out.state)]
-        ))
+        messages.append({"role": "user", "content": step_out.state})
         transcript.append({"role": "user", "content": step_out.state})
 
         if done:
@@ -233,22 +232,19 @@ def load_existing_log(item_id: str) -> EpisodeResult | None:
 
 
 def main() -> None:
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        raise EnvironmentError(
-            "GEMINI_API_KEY non définie. "
-            "Exporter la clé : export GEMINI_API_KEY=your_key"
-        )
+    if not API_KEY:
+        raise EnvironmentError("API_KEY non définie.")
+    if not MODEL_NAME:
+        raise EnvironmentError("MODEL_NAME non défini.")
+    if not API_BASE_URL:
+        raise EnvironmentError("API_BASE_URL non définie.")
 
-    gemini_client = genai.Client(
-        api_key=api_key,
-        http_options=genai_types.HttpOptions(
-            httpx_client=httpx.Client(timeout=90.0),
-        ),
-    )
-    print(f"[eval] Modèle : {MODEL_NAME}")
+    client = OpenAI(api_key=API_KEY, base_url=API_BASE_URL)
+
+    print(f"[eval] Modèle     : {MODEL_NAME}")
+    print(f"[eval] API base   : {API_BASE_URL}")
     print(f"[eval] Rate limit : {RPM_LIMIT} RPM  ({MIN_CALL_INTERVAL:.1f}s min entre appels)")
-    print(f"[eval] Logs → {LOG_DIR}/")
+    print(f"[eval] Logs       → {LOG_DIR}/")
 
     with DATASET_PATH.open() as f:
         items = json.load(f)
@@ -276,13 +272,13 @@ def main() -> None:
         )
         print(f"[eval] Connecté au serveur TextCraft (env_id={env_client.env_id}).")
 
-        last_call_time = [0.0]  # liste pour être mutable dans run_episode
+        last_call_time = [0.0]
         overall_t0 = time.time()
 
         for i, item in enumerate(todo):
             item_id = item["item_id"]
             try:
-                r = run_episode(gemini_client, env_client, item_id, last_call_time)
+                r = run_episode(client, env_client, item_id, last_call_time)
             except Exception as e:
                 print(f"[eval][{i+1}/{len(todo)}] {item_id} CRASH: {e}")
                 continue
@@ -302,16 +298,16 @@ def main() -> None:
         return
 
     successes = sum(1 for r in all_results if r.reward > 0)
-    print("=" * 50)
+    print("=" * 55)
     print(f"RÉSULTATS  {MODEL_NAME}  —  {len(all_results)} items")
     print(f"  ({len(cached)} cached + {len(new_results)} frais)")
-    print("=" * 50)
+    print("=" * 55)
     print(f"Pass@1      = {successes / len(all_results):.4f}  ({successes}/{len(all_results)})")
     print(f"Avg reward  = {sum(r.reward for r in all_results) / len(all_results):.4f}")
     print(f"Mean rounds = {sum(r.rounds for r in all_results) / len(all_results):.1f}")
     print(f"Mean dur/ep = {sum(r.duration_s for r in all_results) / len(all_results):.1f}s")
     print(f"Logs : {LOG_DIR}/")
-    print("=" * 50)
+    print("=" * 55)
 
 
 if __name__ == "__main__":

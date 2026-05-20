@@ -1,0 +1,34 @@
+name: kimi_k2_6_baseline
+date: 2026-05-20
+description: >
+  Évaluation de Kimi K2.6 (Moonshot AI) sur TextCraft via l'API OpenAI-compatible.
+  Kimi K2.6 est positionné comme modèle agent-first avec 1T de paramètres MoE.
+
+algorithm: none (eval only, API calls)
+model: kimi-k2.6 (Moonshot AI) — nom API exact à vérifier sur platform.moonshot.cn
+script: src/eval/eval_openai_compat.py
+
+env_vars:
+  API_BASE_URL: "https://api.moonshot.cn/v1"
+  API_KEY: "requis — clé API Moonshot (platform.moonshot.cn)"
+  MODEL_NAME: "?? — lister les modèles : curl https://api.moonshot.cn/v1/models -H 'Authorization: Bearer $API_KEY'"
+  MAX_ITEMS: "0 = tous les 100 items de test"
+  RPM_LIMIT: "60 (vérifier quota Moonshot)"
+
+prerequisites:
+  - pip install openai
+  - Serveur TextCraft sur 127.0.0.1:36005
+  - Compte Moonshot AI avec crédits (platform.moonshot.cn)
+
+run_command: >
+  API_BASE_URL=https://api.moonshot.cn/v1 API_KEY=xxx MODEL_NAME=<nom_exact_kimi_k2.6>
+  python src/eval/eval_openai_compat.py
+
+result:
+  pass_at_1: "TBD"
+  eval_logs: eval_logs/
+
+notes: >
+  Kimi K2 utilise l'API OpenAI-compatible de Moonshot AI.
+  Vérifier le nom exact du modèle sur platform.moonshot.cn/docs/api/model
+  car les preview releases changent de nom rapidement.
