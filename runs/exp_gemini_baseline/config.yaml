@@ -1,0 +1,35 @@
+name: gemini_baseline
+date: 2026-05-20
+description: >
+  Évaluation de Gemini 2.5 Flash (gemini-2.5-flash) sur TextCraft via l'API Google.
+  Référence externe pour comparer les LLM propriétaires (API) vs notre modèle RL.
+  Objectif : mesurer le Pass@1 d'un modèle SOTA "agent-first" sans fine-tuning TextCraft.
+
+algorithm: none (eval only, API calls)
+model: gemini-2.5-flash (Google)
+script: src/eval/eval_gemini.py
+
+env_vars:
+  GEMINI_API_KEY: "requis — clé API Google"
+  MODEL_NAME: "gemini-2.5-flash  (défaut si non défini)"
+  MAX_ITEMS: "0 = tous les 100 items de test"
+  RPM_LIMIT: "15 (défaut Gemini free tier)"
+
+prerequisites:
+  - pip install google-genai
+  - Serveur TextCraft sur 127.0.0.1:36005
+  - Variable GEMINI_API_KEY définie
+
+run_command: >
+  GEMINI_API_KEY=xxx MODEL_NAME=gemini-2.5-flash python src/eval/eval_gemini.py
+
+result:
+  pass_at_1: "TBD"
+  mean_rounds: "TBD"
+  eval_logs: eval_logs/
+
+notes: >
+  Modèle Gemini 2.5 Flash (sorti mai 2026) — positionné comme agent-first.
+  Taux limite free tier = 15 RPM → ~6-7 min pour 100 items (1 appel/item en moyenne).
+  Le script gère le rate-limiting automatiquement (MIN_CALL_INTERVAL + retry exponentiel).
+  Logs identiques au format eval_baseline.py pour comparaison directe avec analyze_eval.py.
