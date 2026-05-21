@@ -1,0 +1,50 @@
+name: curriculum_depth
+date: ~
+description: >
+  Curriculum de difficulté par depth : 3 phases d'entraînement successives.
+  Phase 1 (steps 0-100) : depth 1-2 uniquement.
+  Phase 2 (steps 0-100, depuis checkpoint) : depth 1-3.
+  Phase 3 (steps 0-100, depuis checkpoint) : tous les depths.
+  Hypothèse : apprendre à enchaîner des recettes courtes avant les longues
+  stabilise le policy et évite le collapse depth 4.
+  Pré-requis : générer data/train/textcraft_train_with_depth.json
+  via src/utils/label_depths.py (conda agentenv-textcraft).
+
+algorithm: GRPO (TRL) + vLLM + curriculum depth staged
+model: Qwen2.5-3B-Instruct
+script: src/train/run_curriculum_staged.sh (orchestre 3 appels à train_grpo.py)
+hardware: 1× B200 80 GB
+
+training:
+  fine_tuning: Full FT (--full-ft)
+  num_generations: 8
+  max_completion_length: 512
+  steps_per_phase: 100
+  max_rounds: 30  # pas de ScalingInter — on isole l'effet du curriculum depth
+  phases:
+    - {max_depth: 2, steps: 100, data: "~109 items depth 1-2"}
+    - {max_depth: 3, steps: 100, data: "~222 items depth 1-3", resume: "checkpoint phase 1"}
+    - {max_depth: 4, steps: 100, data: "374 items tous depths",  resume: "checkpoint phase 2"}
+
+command: >
+  # Pré-requis : générer le fichier de depths
+  conda run -n agentenv-textcraft python src/utils/label_depths.py
+  # Puis lancer le curriculum
+  bash src/train/run_curriculum_staged.sh exp9_curriculum_depth
+
+eval_command: >
+  python src/eval/eval_lora.py
+    --checkpoint saves/trl_grpo/exp9_curriculum_depth_phase3/checkpoint-100
+    --run-name exp9_curriculum_depth
+
+hypotheses:
+  H1: >
+    Le modèle entraîné sur depth 1-2 d'abord apprend une politique de base stable
+    (plan → action → observe) avant d'être exposé aux recettes complexes.
+    On s'attend à de meilleures performances sur depth 3-4 vs exp7 à compute égal.
+  H2: >
+    Si exp9 ≈ exp7, le curriculum de depth n'apporte rien — le problème depth 4
+    est ailleurs (reward sparsity, context length, ou capacité du 3B).
+
+results: ~
+verdict: ~

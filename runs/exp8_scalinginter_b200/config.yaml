@@ -1,0 +1,49 @@
+name: scalinginter_b200
+date: ~
+description: >
+  Même recette qu'exp7 (full FT, N=8, B200) mais avec le curriculum ScalingInter
+  du papier : max_rounds augmente de 10 → 20 → 30 toutes les 100 steps.
+  Objectif : isoler la contribution de ScalingInter vs la réplication simple (exp7).
+  Comparaison directe exp7 vs exp8 → valeur de ScalingInter sur 3B.
+
+algorithm: GRPO (TRL) + vLLM + ScalingInter curriculum
+model: Qwen2.5-3B-Instruct
+script: src/train/train_grpo.py
+hardware: 1× B200 80 GB
+
+training:
+  fine_tuning: Full FT (--full-ft)
+  num_generations: 8
+  max_completion_length: 512
+  max_steps: 300
+  per_device_train_batch_size: 1
+  learning_rate: 1e-6
+  max_rounds_schedule: "10:0,20:100,30:200"  # aligné papier ScalingInter-RL
+  dataset: data/train/textcraft_train.json
+
+command: >
+  conda activate agentgym-rl && python src/train/train_grpo.py
+    --use-vllm
+    --full-ft
+    --num-generations 8
+    --max-completion-length 512
+    --max-items 0
+    --max-steps 300
+    --max-rounds-schedule "10:0,20:100,30:200"
+    --run-name exp8_scalinginter_b200
+
+eval_command: >
+  python src/eval/eval_lora.py
+    --checkpoint saves/trl_grpo/exp8_scalinginter_b200/checkpoint-300
+    --run-name exp8_scalinginter_b200
+
+hypotheses:
+  H1: >
+    ScalingInter force le modèle à résoudre des épisodes plus longs progressivement,
+    ce qui devrait améliorer depth 3 et 4 vs exp7 (max_rounds fixe à 20).
+  H2: >
+    Si exp8 ≈ exp7, alors ScalingInter n'apporte rien de plus que les hyperparamètres
+    propres — le gain du papier viendrait uniquement de full FT + N=8.
+
+results: ~
+verdict: ~

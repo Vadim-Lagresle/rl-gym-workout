@@ -21,10 +21,11 @@ comment y remédier avec les outils modernes (curriculum, SCPO, BOND, CoT, mix S
 | Composant | Détail |
 |---|---|
 | Modèle base | Qwen2.5-3B-Instruct (cible paper) |
-| Framework RL | verl (fork AgentGym-RL) + TRL GRPO pour les expés légères |
+| Framework RL | **TRL GRPO + vLLM** (stack principale, toutes nouvelles expés) |
+| Framework RL legacy | verl (fork AgentGym-RL) — expés 1-6 uniquement, ne pas utiliser pour les nouvelles |
 | Env benchmark | TextCraft via serveur HTTP FastAPI (port 36005) |
-| GPU VM | A100 40 Go (single ou multi via GCP) |
-| Envs conda | `agentgym-rl` (entraînement), `agentenv-textcraft` (serveur jeu) |
+| GPU VM | **B200 192 Go HBM3e** (single GPU, nouvelles expés) — ex-A100 40 Go pour les anciens runs |
+| Envs conda | `agentgym-rl` (entraînement TRL), `agentenv-textcraft` (serveur jeu + label_depths.py) |
 
 ## Architecture du projet
 
@@ -112,6 +113,8 @@ cd ~/rl-gym-workout
 ## Contraintes importantes
 
 - Pas de force-push, pas de commit sans demander.
-- Toujours vérifier le code **avant** de lancer sur les gros GPU (A100/B200) — les ressources sont rares.
+- Toujours vérifier le code **avant** de lancer sur les gros GPU (B200 192 Go) — les ressources sont rares.
 - `gcloud compute config-ssh` écrase parfois le `RemoteForward 8443` dans `~/.ssh/config` sur le Mac.
 - Le remote GitLab pointe sur `https://gitlab.crto.in:8443/v.lagresle/rl-gym-workout.git` (tunnel SSH requis).
+- Les nouvelles expés (exp7+) tournent sur **B200** avec **TRL + vLLM** — ne pas utiliser verl pour les nouveaux runs.
+- exp9 (curriculum) nécessite `data/train/textcraft_train_with_depth.json` généré par `src/utils/label_depths.py` dans l'env `agentenv-textcraft`.

@@ -86,9 +86,20 @@ def check_server() -> None:
     r.raise_for_status()
 
 
-def build_prompt_rows(max_items: int) -> list[dict[str, Any]]:
+def build_prompt_rows(max_items: int, max_depth: int = 0) -> list[dict[str, Any]]:
     with TRAIN_PATH.open() as f:
         rows = json.load(f)
+    if max_depth > 0:
+        depth_file = REPO_ROOT / "data" / "train" / "textcraft_train_with_depth.json"
+        if not depth_file.exists():
+            raise FileNotFoundError(
+                f"--max-depth requires {depth_file}. "
+                "Generate it with: conda run -n agentenv-textcraft python src/utils/label_depths.py"
+            )
+        with depth_file.open() as f:
+            depth_map: dict[str, int] = json.load(f)
+        rows = [r for r in rows if depth_map.get(r["item_id"], 99) <= max_depth]
+        print(f"[curriculum] max_depth={max_depth} → {len(rows)} items retained.", flush=True)
     if max_items > 0:
         rows = rows[:max_items]
 
@@ -303,6 +314,16 @@ def main() -> None:
     parser.add_argument("--max-items", type=int, default=32)
     parser.add_argument("--max-steps", type=int, default=1)
     parser.add_argument("--num-generations", type=int, default=2)
+    parser.add_argument("--max-completion-length", type=int, default=128,
+                        help="Max tokens per assistant turn (128 = smoke test, 512 = proper run).")
+    parser.add_argument("--full-ft", action="store_true", default=False,
+                        help="Full fine-tuning (no LoRA). Requires more VRAM — use on B200.")
+    parser.add_argument("--max-depth", type=int, default=0,
+                        help=(
+                            "Keep only training items with depth <= max-depth. "
+                            "0 = all items. Requires data/train/textcraft_train_with_depth.json "
+                            "(generate with src/utils/label_depths.py)."
+                        ))
     parser.add_argument("--run-name", type=str, default="trl_grpo_textcraft_smoke")
     parser.add_argument(
         "--max-rounds-schedule",
@@ -332,7 +353,7 @@ def main() -> None:
         print(f"[scaling-inter] schedule = {MAX_ROUNDS_SCHEDULE}", flush=True)
 
     check_server()
-    rows = build_prompt_rows(max_items=args.max_items)
+    rows = build_prompt_rows(max_items=args.max_items, max_depth=args.max_depth)
     dataset = Dataset.from_list(rows)
 
     tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH))
@@ -356,7 +377,7 @@ def main() -> None:
         max_steps=args.max_steps,
         num_generations=args.num_generations,
         generation_batch_size=2,
-        max_completion_length=128,
+        max_completion_length=args.max_completion_length,
         temperature=1.0,
         top_p=1.0,
         bf16=True,
@@ -369,7 +390,7 @@ def main() -> None:
         model_init_kwargs={"dtype": "bfloat16", "low_cpu_mem_usage": True},
     )
 
-    peft_config = LoraConfig(
+    peft_config = None if args.full_ft else LoraConfig(
         r=16,
         lora_alpha=32,
         lora_dropout=0.05,
@@ -377,6 +398,8 @@ def main() -> None:
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
     )
+    if args.full_ft:
+        print("[train] Full fine-tuning (no LoRA).", flush=True)
 
     trainer = GRPOTrainer(
         model=str(MODEL_PATH),

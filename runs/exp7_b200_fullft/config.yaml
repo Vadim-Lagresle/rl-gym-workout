@@ -1,0 +1,48 @@
+name: b200_fullft
+date: ~
+description: >
+  Réplication de la recette papier AgentGym-RL sur 1× B200 80 GB avec TRL GRPO + vLLM.
+  Référence propre : full FT (pas LoRA), N=8 rollouts, max_completion_length=512.
+  Objectif : voir si le gap avec le papier (75/100) se réduit avec ces hyperparamètres
+  et combien de steps sont nécessaires pour dépasser la baseline de 18/100.
+
+algorithm: GRPO (TRL) + vLLM
+model: Qwen2.5-3B-Instruct
+script: src/train/train_grpo.py
+hardware: 1× B200 80 GB
+
+training:
+  fine_tuning: Full FT (--full-ft, pas de LoRA)
+  num_generations: 8
+  max_completion_length: 512
+  max_steps: 200
+  per_device_train_batch_size: 1
+  learning_rate: 1e-6
+  max_rounds: 20  # MAX_SIM_ROUNDS hardcodé, pas de ScalingInter
+  dataset: data/train/textcraft_train.json  # 374 items, tous depths
+
+command: >
+  conda activate agentgym-rl && python src/train/train_grpo.py
+    --use-vllm
+    --full-ft
+    --num-generations 8
+    --max-completion-length 512
+    --max-items 0
+    --max-steps 200
+    --run-name exp7_b200_fullft
+
+eval_command: >
+  python src/eval/eval_lora.py
+    --checkpoint saves/trl_grpo/exp7_b200_fullft/checkpoint-200
+    --run-name exp7_b200_fullft
+
+hypotheses:
+  H1: >
+    Full FT + N=8 devraient débloquer depth 2 en comparaison avec les runs
+    LoRA/N=2 précédents. On s'attend à pass@1 > 18 dès step 50 et > 40 à step 200.
+  H2: >
+    max_completion_length=512 vs 128 permet au modèle d'émettre des actions correctes
+    sans troncature (l'action est parsée sur le premier "Action: X" du message).
+
+results: ~
+verdict: ~
