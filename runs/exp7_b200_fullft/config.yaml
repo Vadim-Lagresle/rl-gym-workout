@@ -1,39 +1,46 @@
 name: b200_fullft
 date: ~
 description: >
-  Réplication de la recette papier AgentGym-RL sur 1× B200 80 GB avec TRL GRPO + vLLM.
-  Référence propre : full FT (pas LoRA), N=8 rollouts, max_completion_length=512.
-  Objectif : voir si le gap avec le papier (75/100) se réduit avec ces hyperparamètres
-  et combien de steps sont nécessaires pour dépasser la baseline de 18/100.
+  Réplication de la recette papier AgentGym-RL sur 1× B200 192 GB avec TRL GRPO (sans vLLM, glibc 2.28).
+  Full FT, N=8 rollouts, max_completion_length=512, 12 epochs = 564 steps.
+  Objectif : atteindre la zone 75/100 du papier (Qwen 2.5-3B + GRPO + full FT + N=8 + rounds=30).
 
-algorithm: GRPO (TRL) + vLLM
+algorithm: GRPO (TRL, sans vLLM)
 model: Qwen2.5-3B-Instruct
 script: src/train/train_grpo.py
-hardware: 1× B200 80 GB
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
 
 training:
   fine_tuning: Full FT (--full-ft, pas de LoRA)
   num_generations: 8
   max_completion_length: 512
-  max_steps: 200
-  per_device_train_batch_size: 1
+  max_steps: 564  # 12 epochs × 47 steps/epoch (374 items ÷ bs=8)
+  per_device_train_batch_size: 8
   learning_rate: 1e-6
-  max_rounds: 20  # MAX_SIM_ROUNDS hardcodé, pas de ScalingInter
+  max_rounds: 30  # aligned with paper (rounds=30 in textcraft_train.sh)
   dataset: data/train/textcraft_train.json  # 374 items, tous depths
 
-command: >
-  conda activate agentgym-rl && python src/train/train_grpo.py
-    --use-vllm
+smoke_command: >
+  source ~/envs/agentgym-rl/bin/activate && python src/train/train_grpo.py
     --full-ft
     --num-generations 8
     --max-completion-length 512
     --max-items 0
-    --max-steps 200
+    --max-steps 2
+    --run-name exp7_smoke
+
+command: >
+  source ~/envs/agentgym-rl/bin/activate && python src/train/train_grpo.py
+    --full-ft
+    --num-generations 8
+    --max-completion-length 512
+    --max-items 0
+    --max-steps 564
     --run-name exp7_b200_fullft
 
 eval_command: >
   python src/eval/eval_lora.py
-    --checkpoint saves/trl_grpo/exp7_b200_fullft/checkpoint-200
+    --checkpoint saves/trl_grpo/exp7_b200_fullft/checkpoint-564
     --run-name exp7_b200_fullft
 
 hypotheses:

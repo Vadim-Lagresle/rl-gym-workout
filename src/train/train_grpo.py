@@ -34,7 +34,7 @@ from agentenv.envs import TextCraftEnvClient
 
 
 # Paths
-REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
+REPO_ROOT = Path(os.environ.get("REPO_ROOT", Path(__file__).resolve().parents[2]))
 MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
 TRAIN_PATH = REPO_ROOT / "data" / "train" / "textcraft_train.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
@@ -42,7 +42,7 @@ ENV_SERVER_URL = "http://127.0.0.1:36005"
 
 # Constants and utils for the interactive rollout and reward shaping.
 SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
-MAX_SIM_ROUNDS = 20  # default cap when no curriculum is given
+MAX_SIM_ROUNDS = 30  # aligned with paper (AgentGym-RL textcraft_train.sh rounds=30)
 ITEM_TAG_RE = re.compile(r"^<ITEM_IDX:(\d+)>$")
 
 # ScalingInter curriculum: list of (step_threshold, max_rounds) sorted by step.
@@ -367,24 +367,31 @@ def main() -> None:
         output_dir=str(out_dir),
         run_name=args.run_name,
         report_to=[],
-        per_device_train_batch_size=1,
+        per_device_train_batch_size=8,
         gradient_accumulation_steps=1,
         learning_rate=1e-6,
         # Explicit clip (default is also 1.0, but make intent clear after the
         # grad_norm=1765 spike at step 35 of v2 — see WORKLOG step50 anomaly).
         max_grad_norm=1.0,
+        # KL regularization: paper uses kl_loss_coef=0.001 (low_var_kl type).
+        # TRL beta is equivalent; default 0.0 means no KL penalty at all.
+        beta=0.001,
         use_vllm=args.use_vllm,
         max_steps=args.max_steps,
         num_generations=args.num_generations,
-        generation_batch_size=2,
         max_completion_length=args.max_completion_length,
         temperature=1.0,
         top_p=1.0,
         bf16=True,
         logging_steps=1,
         save_strategy="steps",
-        save_steps=5,
-        save_total_limit=3,
+        # Full FT checkpoints: ~6 GB model (save_only_model=True skips ~24 GB optimizer).
+        # Disk budget: ~20 GB free after pip cache purge.
+        # Save every epoch (steps_per_epoch ≈ max_steps/12 for 12-epoch run),
+        # keep 2 checkpoints so we always have the last two epochs (peak ~12 GB on disk).
+        save_steps=max(1, args.max_steps // 12) if args.full_ft else 5,
+        save_total_limit=2 if args.full_ft else 3,
+        save_only_model=args.full_ft,
         eval_strategy="no",
         gradient_checkpointing=True,
         model_init_kwargs={"dtype": "bfloat16", "low_cpu_mem_usage": True},

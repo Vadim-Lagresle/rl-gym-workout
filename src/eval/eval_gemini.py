@@ -42,7 +42,7 @@ except ImportError:
     raise ImportError("Installer google-genai et httpx : pip install google-genai httpx")
 
 
-REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
+REPO_ROOT = Path(os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[2])))
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 
 MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-3.5-flash")

@@ -47,7 +47,7 @@ from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 
 
-REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
+REPO_ROOT = Path(os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[2])))
 MODEL_PATH = Path(os.environ.get("MODEL_PATH", str(REPO_ROOT / "models" / "Qwen2.5-3B-Instruct")))
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 LOG_DIR = Path(os.environ.get("EVAL_LOG_DIR", str(REPO_ROOT / "runs" / "exp1_baseline" / "eval_logs")))

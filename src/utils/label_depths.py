@@ -21,7 +21,7 @@ import json
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
+REPO_ROOT = Path(os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[2])))
 TRAIN_PATH = REPO_ROOT / "data" / "train" / "textcraft_train.json"
 OUT_PATH   = REPO_ROOT / "data" / "train" / "textcraft_train_with_depth.json"
 

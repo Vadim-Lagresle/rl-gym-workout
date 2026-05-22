@@ -49,7 +49,7 @@ except ImportError:
     raise ImportError("Installer openai : pip install openai")
 
 
-REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
+REPO_ROOT = Path(os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[2])))
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 
 API_BASE_URL = os.environ.get("API_BASE_URL", "")

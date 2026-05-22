@@ -13,9 +13,10 @@ import argparse
 import json
 import sys
 from collections import defaultdict
+import os
 from pathlib import Path
 
-REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
+REPO_ROOT = Path(os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[2])))
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 
 
@@ -34,7 +35,7 @@ ct = CraftingTree(minecraft_dir="agentenv_textcraft")
 item_depth_list = list(ct.item_recipes_min_depth(1))
 sorted_list = sorted(item_depth_list, key=lambda x: x[1])
 
-with open("/home/v.lagresle/rl-gym-workout/data/eval/textcraft_test.json") as f:
+with open(str(DATASET_PATH)) as f:
     items = json.load(f)
 
 result = {}

@@ -1573,9 +1573,131 @@ curl https://api.deepseek.com/v1/models -H "Authorization: Bearer $API_KEY"  # D
 
 ---
 
-## TODO prochaine session training
+## TODO prochaine session training (verl, A100 — obsolète depuis migration B200)
 
-- [ ] **Ablation LoRA vs full FT** : lancer un run LoRA (r=16) avec exactement les mêmes hyperparamètres que Exp 6 (N=8, batch=8, max_response_length=4096, 4× A100) pour isoler proprement l'effet du fine-tuning method. Si LoRA atteint le même Pass@1 → les optimizer states libérés (~10-12 Go/GPU) peuvent être réinvestis en `max_response_length` plus grand (8192 voire 10240) et `max_model_len` plus grand. Si LoRA rate → confirme que full FT est nécessaire pour cette tâche.
-- [ ] **Augmenter `max_response_length`** : passer de 4096 à 8192 dans `textcraft_train.4gpu.sh`. Les épisodes depth-2 qui nécessitent >8 tours étaient tronqués pendant le training → pas de signal de reward → le modèle n'apprend pas à chaîner les crafts intermédiaires. C'est probablement la cause principale du gap depth-2 (24% vs 90%).
-- [ ] **Continuer Exp 6 jusqu'à ~200 steps** pour voir si la courbe converge vers 75/100 (papier). À 50 steps on a vu seulement 400 queries vs 4800 au checkpoint d'éval du papier (step 150).
+Ces TODO datent de la période GCP/verl. Ils restent à titre d'archive.
+Les nouvelles expériences (exp7/8/9) se font sur **B200 avec TRL+GRPO** (voir ci-dessous).
+
+- [ ] ~~Ablation LoRA vs full FT sur 4× A100~~
+- [ ] ~~Augmenter `max_response_length` dans `textcraft_train.4gpu.sh`~~
+- [ ] ~~Continuer Exp 6 jusqu'à ~200 steps~~
+
+---
+
+## Session 2026-05-22 — Migration vers Criteo JupyterHub (B200 192 Go), setup de l'environnement
+
+### Contexte
+
+Passage de la VM GCP A100 40 Go au **Criteo JupyterHub B200 192 Go HBM3e**
+(user: `criteo`, plateforme Coder). Plus de VM GCP — tout est refait from scratch
+dans le home persistant `/home/criteo/`.
+
+### Contraintes infrastructurelles découvertes
+
+| Contrainte | Cause | Solution |
+|---|---|---|
+| **Pas de conda** | repo.anaconda.com bloqué réseau Criteo | `python -m venv` via pyenv (Python 3.11.7) |
+| **vllm impossible** | TRL 1.4.0 requiert vllm 0.12.0–0.18.x ; ceux-ci requièrent glibc ≥ 2.31 ; notre glibc = 2.28 | vllm non installé — TRL fonctionne via `rollout_func` sans vllm |
+| **`huggingface-cli` déprécié** | changement upstream HF | utiliser `hf` CLI (`pip install hf`, puis `hf download ...`) |
+
+Détail vllm : vllm ≤ 0.9.1 est compatible glibc 2.28, mais TRL 1.4.0 importe
+`StructuredOutputsParams` (absent de vllm 0.9.x) → `ImportError` dès `import trl`.
+Versions 0.12.0–0.18.x requièrent glibc ≥ 2.31 (manylinux_2_31). Impasse.
+
+### Environnements créés (virtualenvs pyenv)
+
+| Env | Chemin | Stack principale |
+|---|---|---|
+| `agentgym-rl` | `~/envs/agentgym-rl` | Python 3.11.7, torch 2.7.0+cu126, transformers 5.9.0, TRL 1.4.0, peft 0.19.1, accelerate, datasets |
+| `agentenv-textcraft` | `~/envs/agentenv-textcraft` | Python 3.11.7, fastapi, uvicorn, gymnasium, transformers, agentenv, agentenv_textcraft (editable) |
+
+Commandes d'activation :
+```bash
+source ~/envs/agentgym-rl/bin/activate        # training
+source ~/envs/agentenv-textcraft/bin/activate  # serveur TextCraft
+```
+
+### Modèle téléchargé
+
+`models/Qwen2.5-3B-Instruct/` — 5.8 Go (2 shards safetensors + tokenizer).
+
+### Corrections de chemins hardcodés (`/home/v.lagresle/`)
+
+Tous les scripts `src/` avaient `REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")`.
+Remplacés par :
+```python
+REPO_ROOT = Path(os.environ.get("REPO_ROOT", Path(__file__).resolve().parents[2]))
+```
+Fichiers corrigés : `src/train/train_grpo.py`, `src/eval/eval_baseline.py`,
+`src/eval/eval_lora.py`, `src/eval/eval_gemini.py`, `src/eval/eval_openai_compat.py`,
+`src/utils/label_depths.py`, `src/eval/analyze_gemini.py` (+ ajout `import os`),
+`src/eval/auto_eval.sh` (bash : `REPO_ROOT=$(cd ... && pwd)`).
+
+### Configs exp7/8/9 mises à jour
+
+- Ligne `--use-vllm` supprimée de `runs/exp7_b200_fullft/config.yaml` et
+  `runs/exp8_scalinginter_b200/config.yaml` (exp9 n'en avait pas).
+- `conda activate agentgym-rl &&` → `source ~/envs/agentgym-rl/bin/activate &&`
+  dans les trois configs.
+
+### Fichier de personnalisation JupyterHub
+
+`/home/criteo/personalize` (exécuté à chaque démarrage de workspace Coder) :
+```bash
+alias activate-train='source /home/criteo/envs/agentgym-rl/bin/activate'
+alias activate-textcraft='source /home/criteo/envs/agentenv-textcraft/bin/activate'
+export REPO_ROOT="/home/criteo/rl-gym-workout"
+```
+
+### Smoke test des imports (résultat final)
+
+```
+torch 2.7.0+cu126  CUDA=True
+transformers 5.9.0
+trl 1.4.0
+peft 0.19.1
+TextCraftEnvClient OK
+REPO_ROOT = /home/criteo/rl-gym-workout
+MODEL_PATH = /home/criteo/rl-gym-workout/models/Qwen2.5-3B-Instruct
+Model exists: True
+Train data: True
+```
+
+### Commandes de démarrage (remplacent toutes les commandes conda du worklog)
+
+```bash
+# Panneau A — serveur TextCraft
+source ~/envs/agentenv-textcraft/bin/activate
+cd ~/rl-gym-workout/external/AgentGym/agentenv-textcraft
+textcraft --host 127.0.0.1 --port 36005
+
+# Panneau B — training exp7
+source ~/envs/agentgym-rl/bin/activate
+cd ~/rl-gym-workout
+python src/train/train_grpo.py \
+  --full-ft --num-generations 8 \
+  --max-completion-length 512 \
+  --max-items 0 --max-steps 200 \
+  --run-name exp7_b200_fullft
+```
+
+### Contrainte disque critique (à résoudre avant de lancer exp7)
+
+Disque : 35 Go total, 25 Go utilisés, **9.8 Go libres**.
+Config actuelle dans `train_grpo.py` : `save_steps=5, save_total_limit=3`.
+
+Taille d'un checkpoint full FT :
+- Poids modèle bf16 : ~6 Go
+- États optimizer AdamW fp32 (momentum + variance) : ~24 Go
+- **Total par checkpoint : ~30 Go → NE RENTRE PAS dans 9.8 Go libres**
+
+Solution : ajouter `save_only_model=True` (disponible dans transformers 5.9.0)
++ réduire la fréquence. Voir section suivante pour les modifications à faire.
+
+### Pièges spécifiques B200/Criteo JupyterHub (à ne pas refaire)
+
+- **Pas de conda** → toujours `source ~/envs/NAME/bin/activate`
+- **vllm absent** → ne jamais ajouter `--use-vllm` ni `use_vllm=True` dans les configs
+- **`hf` CLI** (pas `huggingface-cli`) pour downloader les modèles HF
+- **Disque serré** (9.8 Go libres) → voir §"Contrainte disque" ci-dessus
 

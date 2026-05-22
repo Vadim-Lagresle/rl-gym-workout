@@ -15,7 +15,7 @@
 set -uo pipefail
 
 TRAIN_PID="${TRAIN_PID:?need TRAIN_PID}"
-REPO_ROOT="/home/v.lagresle/rl-gym-workout"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 echo "[auto-eval] watching PID=$TRAIN_PID..."
 while kill -0 "$TRAIN_PID" 2>/dev/null; do

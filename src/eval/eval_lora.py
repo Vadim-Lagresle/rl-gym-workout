@@ -37,7 +37,7 @@ from vllm import LLM, SamplingParams
 from vllm.lora.request import LoRARequest
 
 
-REPO_ROOT = Path("/home/v.lagresle/rl-gym-workout")
+REPO_ROOT = Path(os.environ.get("REPO_ROOT", str(Path(__file__).resolve().parents[2])))
 MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 
