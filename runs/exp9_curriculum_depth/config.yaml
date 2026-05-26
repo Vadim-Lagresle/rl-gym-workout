@@ -10,16 +10,18 @@ description: >
   Pré-requis : générer data/train/textcraft_train_with_depth.json
   via src/utils/label_depths.py (conda agentenv-textcraft).
 
-algorithm: GRPO (TRL) + vLLM + curriculum depth staged
+algorithm: GRPO (TRL, sans vLLM) + curriculum depth staged
 model: Qwen2.5-3B-Instruct
 script: src/train/run_curriculum_staged.sh (orchestre 3 appels à train_grpo.py)
-hardware: 1× B200 80 GB
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
 
 training:
   fine_tuning: Full FT (--full-ft)
-  num_generations: 8
+  num_generations: 16  # N=16 : réduit frac_reward_zero_std de 37%→14%, GPU safe (88 GB libres)
   max_completion_length: 512
   steps_per_phase: 100
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
   max_rounds: 30  # pas de ScalingInter — on isole l'effet du curriculum depth
   phases:
     - {max_depth: 2, steps: 100, data: "~109 items depth 1-2"}
@@ -27,13 +29,13 @@ training:
     - {max_depth: 4, steps: 100, data: "374 items tous depths",  resume: "checkpoint phase 2"}
 
 command: >
-  # Pré-requis : générer le fichier de depths
-  conda run -n agentenv-textcraft python src/utils/label_depths.py
+  # Pré-requis : générer le fichier de depths (env agentenv-textcraft, pas conda)
+  source ~/envs/agentenv-textcraft/bin/activate && python src/utils/label_depths.py
   # Puis lancer le curriculum
-  bash src/train/run_curriculum_staged.sh exp9_curriculum_depth
+  source ~/envs/agentgym-rl/bin/activate && bash src/train/run_curriculum_staged.sh exp9_curriculum_depth
 
 eval_command: >
-  python src/eval/eval_lora.py
+  python src/eval/eval_fullft.py
     --checkpoint saves/trl_grpo/exp9_curriculum_depth_phase3/checkpoint-100
     --run-name exp9_curriculum_depth
 

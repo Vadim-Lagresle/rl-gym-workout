@@ -367,8 +367,11 @@ def main() -> None:
         output_dir=str(out_dir),
         run_name=args.run_name,
         report_to=[],
-        per_device_train_batch_size=8,
-        gradient_accumulation_steps=1,
+        # bs=1 + grad_acc=8 avoids OOM on B200: forward pass logits = 8×seq×vocab
+        # instead of 64×seq×vocab (bs=8 would OOM at 148 GB for 7664-token seqs).
+        # Mathematically equivalent to bs=8 for GRPO (per-prompt advantage norm is unchanged).
+        per_device_train_batch_size=1,
+        gradient_accumulation_steps=8,
         learning_rate=1e-6,
         # Explicit clip (default is also 1.0, but make intent clear after the
         # grad_norm=1765 spike at step 35 of v2 — see WORKLOG step50 anomaly).
@@ -384,13 +387,11 @@ def main() -> None:
         top_p=1.0,
         bf16=True,
         logging_steps=1,
-        save_strategy="steps",
-        # Full FT checkpoints: ~6 GB model (save_only_model=True skips ~24 GB optimizer).
-        # Disk budget: ~20 GB free after pip cache purge.
-        # Save every epoch (steps_per_epoch ≈ max_steps/12 for 12-epoch run),
-        # keep 2 checkpoints so we always have the last two epochs (peak ~12 GB on disk).
+        # Disable saving for smoke tests (max_steps <= 10) to avoid wasting 6 GB per run.
+        # For real runs: save every epoch, keep 1 checkpoint (peak disk = 12 GB during write).
+        save_strategy="no" if args.max_steps <= 10 else "steps",
         save_steps=max(1, args.max_steps // 12) if args.full_ft else 5,
-        save_total_limit=2 if args.full_ft else 3,
+        save_total_limit=1 if args.full_ft else 3,
         save_only_model=args.full_ft,
         eval_strategy="no",
         gradient_checkpointing=True,

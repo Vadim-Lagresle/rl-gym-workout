@@ -6,17 +6,18 @@ description: >
   Objectif : isoler la contribution de ScalingInter vs la réplication simple (exp7).
   Comparaison directe exp7 vs exp8 → valeur de ScalingInter sur 3B.
 
-algorithm: GRPO (TRL) + vLLM + ScalingInter curriculum
+algorithm: GRPO (TRL, sans vLLM) + ScalingInter curriculum
 model: Qwen2.5-3B-Instruct
 script: src/train/train_grpo.py
-hardware: 1× B200 80 GB
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
 
 training:
   fine_tuning: Full FT (--full-ft)
-  num_generations: 8
+  num_generations: 16  # N=16 : réduit frac_reward_zero_std de 37%→14%, GPU safe (88 GB libres)
   max_completion_length: 512
   max_steps: 300
   per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
   learning_rate: 1e-6
   max_rounds_schedule: "10:0,20:100,30:200"  # aligné papier ScalingInter-RL
   dataset: data/train/textcraft_train.json
@@ -24,7 +25,7 @@ training:
 command: >
   source ~/envs/agentgym-rl/bin/activate && python src/train/train_grpo.py
     --full-ft
-    --num-generations 8
+    --num-generations 16
     --max-completion-length 512
     --max-items 0
     --max-steps 300
@@ -32,7 +33,7 @@ command: >
     --run-name exp8_scalinginter_b200
 
 eval_command: >
-  python src/eval/eval_lora.py
+  python src/eval/eval_fullft.py
     --checkpoint saves/trl_grpo/exp8_scalinginter_b200/checkpoint-300
     --run-name exp8_scalinginter_b200
 

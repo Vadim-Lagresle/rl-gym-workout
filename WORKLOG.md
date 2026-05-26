@@ -1697,7 +1697,68 @@ Solution : ajouter `save_only_model=True` (disponible dans transformers 5.9.0)
 ### Pièges spécifiques B200/Criteo JupyterHub (à ne pas refaire)
 
 - **Pas de conda** → toujours `source ~/envs/NAME/bin/activate`
-- **vllm absent** → ne jamais ajouter `--use-vllm` ni `use_vllm=True` dans les configs
+- **vllm absent et inutilisable** → vLLM nécessite glibc ≥ 2.31 ; le serveur Coder Criteo
+  tourne sur RHEL/CentOS 8 avec glibc 2.28. Mettre à jour glibc = upgrader l'OS entier,
+  c'est de la responsabilité de l'infra Criteo, pas de notre ressort. **On ne pourra pas
+  utiliser vLLM sur ce setup.** Ne jamais ajouter `--use-vllm` ni `use_vllm=True`.
 - **`hf` CLI** (pas `huggingface-cli`) pour downloader les modèles HF
 - **Disque serré** (9.8 Go libres) → voir §"Contrainte disque" ci-dessus
+
+### Hyperparamètres GRPO : bs, N et la vraie contrainte (HTTP)
+
+**Pourquoi augmenter bs n'accélère pas le training ici :**
+
+Dans un setup supervised classique, doubler bs accélère le training (GPU traite plus
+de données par unité de temps). Ici c'est différent : le goulot d'étranglement est
+les **appels HTTP vers le serveur TextCraft** (30 tours × N rollouts × ~0.5s/appel),
+pas le GPU. Exemple : bs=1/grad_acc=8 et bs=4/grad_acc=2 donnent exactement le même
+nombre d'appels HTTP par optimizer step (1920 dans les deux cas) → même wall-clock.
+Le GPU est déjà idle 80-90% du temps en attendant les réponses HTTP.
+
+**Le vrai levier : N (num_generations)**
+
+N contrôle le nombre de rollouts par prompt. Plus N est grand :
+- Meilleure estimation de l'avantage GRPO (variance réduite, ∝ √N)
+- Moins de steps "morts" : avec reward sparse 0/1 et p_succès=12%,
+  P(tous les rollouts à 0) = 0.88^N → 37% pour N=8, 14% pour N=16, 2% pour N=32.
+- Coût : ×N appels HTTP → ×N temps par step (linéaire)
+
+Rendements décroissants au-delà de N≈32 (gain ∝ √N, coût ∝ N).
+
+**La vraie optimisation : rollout HTTP parallèle**
+
+Si on parallélise les N appels HTTP à chaque tour (ThreadPoolExecutor),
+le coût des appels passe de N×latence à max(latence) ≈ constante.
+- N=8 parallèle : ~40s/step (vs 115s actuel) → ×3 plus rapide
+- N=32 parallèle : ~150s/step → ×4 plus de signal pour même budget temps
+À implémenter dans rollout_func pour exp8 ou exp9.
+
+**Mémoire GPU disponible :**
+- Actuel : 95 GB utilisés / 183 GB → 88 GB libres
+- N=16 safe : 16 traj × ~3000 tokens × vocab × 2 bytes ≈ 29 GB supplémentaires
+- N=32 safe : ~58 GB supplémentaires → reste dans les 183 GB
+
+**Décision pour exp8/exp9 : N=16** (sans rollout parallèle pour l'instant, à coder ensuite)
+
+### Évaluation des checkpoints full FT — pourquoi eval_fullft.py
+
+Les deux scripts d'eval existants (`eval_baseline.py`, `eval_lora.py`) utilisent **vLLM**
+pour la génération. vLLM nécessite **glibc ≥ 2.31**, mais le serveur B200/Coder a
+**glibc 2.28** → import impossible, `ImportError` immédiat.
+
+De plus, `eval_lora.py` vérifie la présence d'un `adapter_config.json` (fichier LoRA PEFT)
+qui n'existe pas dans un checkpoint full FT — il ne charge que des adapters LoRA.
+
+**Solution** : `src/eval/eval_fullft.py` — même logique d'épisode multi-tour que
+`eval_baseline.py`, mais génération via `AutoModelForCausalLM.from_pretrained()` +
+`model.generate()` (transformers pur, sans vLLM). Contrepartie : ~5-10× plus lent
+(pas de batching optimisé), soit ~30-40 min pour 100 items au lieu de 5 min avec vLLM.
+
+Usage :
+```bash
+source ~/envs/agentgym-rl/bin/activate
+python src/eval/eval_fullft.py \
+    --checkpoint saves/trl_grpo/exp7_b200_fullft/checkpoint-564 \
+    --run-name exp7_b200_fullft
+```
 
