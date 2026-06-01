@@ -40,7 +40,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 MAX_ROUNDS = 30
-SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+DEFAULT_SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
 
 @dataclass
@@ -61,16 +61,25 @@ def item_id_to_idx(item_id: str) -> int:
     return int(m.group(1))
 
 
-def build_initial_messages(client: TextCraftEnvClient) -> list[dict]:
+def build_initial_messages(client: TextCraftEnvClient, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> list[dict]:
     rules_msg = client.conversation_start[0]["value"]
     ack_msg = client.conversation_start[1]["value"]
     initial_obs = client.observe()
-    return [
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": rules_msg},
-        {"role": "assistant", "content": ack_msg},
-        {"role": "user", "content": initial_obs},
-    ]
+    # If system_prompt is empty (e.g. Gemma-3 which rejects system role),
+    # inject it at the start of the first user message instead.
+    if system_prompt:
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": rules_msg},
+            {"role": "assistant", "content": ack_msg},
+            {"role": "user", "content": initial_obs},
+        ]
+    else:
+        return [
+            {"role": "user", "content": rules_msg},
+            {"role": "assistant", "content": ack_msg},
+            {"role": "user", "content": initial_obs},
+        ]
 
 
 def generate_reply(model, tokenizer, messages: list[dict], max_new_tokens: int = 512) -> str:
@@ -97,10 +106,11 @@ def run_episode(
     client: TextCraftEnvClient,
     item_id: str,
     max_rounds: int = MAX_ROUNDS,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
 ) -> EpisodeResult:
     item_idx = item_id_to_idx(item_id)
     client.reset(item_idx)
-    messages = build_initial_messages(client)
+    messages = build_initial_messages(client, system_prompt=system_prompt)
     t0 = time.time()
     reward = 0.0
     done = False
@@ -174,6 +184,8 @@ def main() -> None:
     parser.add_argument("--run-name", required=True, help="Run name for log dir (runs/<run-name>/eval_logs/)")
     parser.add_argument("--max-items", type=int, default=0, help="0 = all 100 items")
     parser.add_argument("--force-redo", action="store_true", help="Ignore cached logs")
+    parser.add_argument("--system-prompt", type=str, default=DEFAULT_SYSTEM_PROMPT,
+                        help="System prompt. Pass '' for models without system role (e.g. Gemma-3).")
     args = parser.parse_args()
 
     checkpoint_path = Path(args.checkpoint)
@@ -221,7 +233,7 @@ def main() -> None:
         for i, item in enumerate(todo):
             item_id = item["item_id"]
             try:
-                r = run_episode(model, tokenizer, client, item_id)
+                r = run_episode(model, tokenizer, client, item_id, system_prompt=args.system_prompt)
             except Exception as e:
                 print(f"[eval][{i+1}/{len(todo)}] {item_id} CRASHED: {e}")
                 continue

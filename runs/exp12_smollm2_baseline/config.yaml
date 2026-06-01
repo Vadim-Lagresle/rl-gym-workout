@@ -1,0 +1,21 @@
+name: smollm2_baseline
+date: 2026-05-30
+model: HuggingFaceTB/SmolLM2-1.7B-Instruct
+model_path: models/SmolLM2-1.7B-Instruct
+system_prompt: "You are a helpful AI assistant."
+description: Baseline Pass@1 de SmolLM2-1.7B-Instruct sur TextCraft (sans training).
+
+download_command: >
+  source ~/envs/agentgym-rl/bin/activate && python -c "
+  from huggingface_hub import snapshot_download
+  snapshot_download('HuggingFaceTB/SmolLM2-1.7B-Instruct',
+      local_dir='models/SmolLM2-1.7B-Instruct', ignore_patterns=['*.pt','*.gguf'])
+  "
+
+baseline_eval_command: >
+  source ~/envs/agentgym-rl/bin/activate && python src/eval/eval_fullft.py
+    --checkpoint models/SmolLM2-1.7B-Instruct
+    --run-name exp12_smollm2_baseline
+    --system-prompt "You are a helpful AI assistant."
+
+results: ~

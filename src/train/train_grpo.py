@@ -16,7 +16,8 @@ Usage :
 #Dependecies :
 from __future__ import annotations # for Python 3.10+ type hinting, ie more flexible 
 
-import argparse 
+import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 import re
@@ -35,13 +36,13 @@ from agentenv.envs import TextCraftEnvClient
 
 # Paths
 REPO_ROOT = Path(os.environ.get("REPO_ROOT", Path(__file__).resolve().parents[2]))
-MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
+DEFAULT_MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
 TRAIN_PATH = REPO_ROOT / "data" / "train" / "textcraft_train.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 
 
 # Constants and utils for the interactive rollout and reward shaping.
-SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+DEFAULT_SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 MAX_SIM_ROUNDS = 30  # aligned with paper (AgentGym-RL textcraft_train.sh rounds=30)
 ITEM_TAG_RE = re.compile(r"^<ITEM_IDX:(\d+)>$")
 
@@ -86,7 +87,7 @@ def check_server() -> None:
     r.raise_for_status()
 
 
-def build_prompt_rows(max_items: int, max_depth: int = 0) -> list[dict[str, Any]]:
+def build_prompt_rows(max_items: int, max_depth: int = 0, system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> list[dict[str, Any]]:
     with TRAIN_PATH.open() as f:
         rows = json.load(f)
     if max_depth > 0:
@@ -112,12 +113,21 @@ def build_prompt_rows(max_items: int, max_depth: int = 0) -> list[dict[str, Any]
         item_id = r["item_id"]
         idx = item_id_to_idx(item_id)
         # Hidden marker only for rollout_func bookkeeping (removed before generation).
-        prompt = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": manual_human},
-            {"role": "assistant", "content": manual_ack},
-            {"role": "user", "content": f"<ITEM_IDX:{idx}>"},
-        ]
+        # If system_prompt is empty (e.g. Gemma-3 which rejects system role), inject
+        # it at the start of the first user message instead.
+        if system_prompt:
+            prompt = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": manual_human},
+                {"role": "assistant", "content": manual_ack},
+                {"role": "user", "content": f"<ITEM_IDX:{idx}>"},
+            ]
+        else:
+            prompt = [
+                {"role": "user", "content": manual_human},
+                {"role": "assistant", "content": manual_ack},
+                {"role": "user", "content": f"<ITEM_IDX:{idx}>"},
+            ]
         out.append({"prompt": prompt, "item_id": item_id, "item_idx": idx})
 
     try:
@@ -190,57 +200,77 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
     prompt_ids_out: list[list[int]] = [[] for _ in range(n)]
     completion_ids_out: list[list[int]] = [[] for _ in range(n)]
     logprobs_out: list[list[float]] = [[] for _ in range(n)]
+    # env_mask: 1 = action token (model output, gradient active)
+    #           0 = observation token (env output, gradient masked)
+    # Passed to TRL as "env_mask"; TRL multiplies completion_mask by it before loss.
+    # Fix for multi-turn logprob mismatch: completion_ids now includes observations
+    # so the backward pass sees the same context as generation. Obs tokens are masked.
+    env_mask_out: list[list[int]] = [[] for _ in range(n)]
 
     cap = current_max_rounds(trainer)
     if MAX_ROUNDS_SCHEDULE is not None:
         step = int(getattr(getattr(trainer, "state", None), "global_step", 0) or 0)
         print(f"[scaling-inter] step={step} max_rounds={cap}", flush=True)
-    for round_idx in range(cap):
-        active = [i for i in range(n) if not done[i]]
-        if not active:
-            break
 
-        round_prompt_ids: list[list[int]] = []
-        for i in active:
-            rendered = tokenizer.apply_chat_template(states[i], tokenize=False, add_generation_prompt=True)
-            prompt_ids = tokenizer.encode(rendered, add_special_tokens=False)
-            round_prompt_ids.append(prompt_ids)
-            if round_idx == 0:
-                prompt_ids_out[i] = prompt_ids
+    with ThreadPoolExecutor(max_workers=n) as executor:
+        for round_idx in range(cap):
+            active = [i for i in range(n) if not done[i]]
+            if not active:
+                break
 
-        # Use trainer internal generator to get completion token IDs + per-token logprobs.
-        round_completion_ids, round_logprobs = trainer._generate_single_turn(
-            round_prompt_ids, images=None, multimodal_fields={}
-        )
+            round_prompt_ids: list[list[int]] = []
+            for i in active:
+                rendered = tokenizer.apply_chat_template(states[i], tokenize=False, add_generation_prompt=True)
+                prompt_ids = tokenizer.encode(rendered, add_special_tokens=False)
+                round_prompt_ids.append(prompt_ids)
+                if round_idx == 0:
+                    prompt_ids_out[i] = prompt_ids
 
-        # Update env state one sample at a time.
-        for j, i in enumerate(active):
-            ids = round_completion_ids[j]
-            lps = round_logprobs[j] if round_logprobs is not None else [0.0] * len(ids)
+            # Use trainer internal generator to get completion token IDs + per-token logprobs.
+            round_completion_ids, round_logprobs = trainer._generate_single_turn(
+                round_prompt_ids, images=None, multimodal_fields={}
+            )
 
-            text = tokenizer.decode(ids, skip_special_tokens=True)
-            states[i].append({"role": "assistant", "content": text})
+            # Phase 1 — decode completions and extract actions (CPU, sequential).
+            actions: dict[int, str] = {}
+            for j, i in enumerate(active):
+                ids = round_completion_ids[j]
+                lps = round_logprobs[j] if round_logprobs is not None else [0.0] * len(ids)
+                text = tokenizer.decode(ids, skip_special_tokens=True)
+                states[i].append({"role": "assistant", "content": text})
+                actions_per_turn_sum[i] += count_actions(text)
+                n_active_turns[i] += 1
+                actions[i] = first_action_or_empty(text)
+                completion_ids_out[i].extend(ids)
+                logprobs_out[i].extend(lps[: len(ids)])
+                env_mask_out[i].extend([1] * len(ids))  # action tokens → gradient active
 
-            # Count actions inside *this* assistant message (per-turn signal).
-            # Same parser as `count_actions` so it is consistent with action extraction.
-            n_actions_this_turn = count_actions(text)
-            actions_per_turn_sum[i] += n_actions_this_turn
-            n_active_turns[i] += 1
+            # Phase 2 — parallel HTTP calls to TextCraft server (IO-bound).
+            # All N env.step() calls are submitted simultaneously; wall time ≈ max(latency)
+            # instead of N × latency, giving ~N× speedup on the HTTP bottleneck.
+            futures = [(executor.submit(env_clients[i].step, f"Action: {actions[i]}"), i)
+                       for i in active]
+            step_results = {i: fut.result() for fut, i in futures}
 
-            action = first_action_or_empty(text)
-            step = env_clients[i].step(f"Action: {action}")
-            obs = step.state
-            rew = float(step.reward)
-            is_done = bool(step.done)
-            states[i].append({"role": "user", "content": obs})
-
-            completion_ids_out[i].extend(ids)
-            logprobs_out[i].extend(lps[: len(ids)])
-            final_rewards[i] = max(final_rewards[i], rew)
-            low = obs.lower()
-            if "could not" in low or "error:" in low or "wrong item format" in low:
-                invalid_counts[i] += 1
-            done[i] = is_done
+            # Phase 3 — update state with env responses (CPU, sequential).
+            for i in active:
+                step_out = step_results[i]
+                obs = step_out.state
+                rew = float(step_out.reward)
+                is_done = bool(step_out.done)
+                states[i].append({"role": "user", "content": obs})
+                final_rewards[i] = max(final_rewards[i], rew)
+                low = obs.lower()
+                if "could not" in low or "error:" in low or "wrong item format" in low:
+                    invalid_counts[i] += 1
+                done[i] = is_done
+                # Include observation tokens in completion so the backward pass has
+                # the correct context for computing action logprobs. env_mask=0
+                # ensures no gradient flows through these tokens.
+                obs_ids = tokenizer.encode(obs, add_special_tokens=False)
+                completion_ids_out[i].extend(obs_ids)
+                logprobs_out[i].extend([0.0] * len(obs_ids))
+                env_mask_out[i].extend([0] * len(obs_ids))
 
     for env in env_clients:
         try:
@@ -248,11 +278,12 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
         except Exception:
             pass
 
-    # Guarantee non-empty completion/logprobs arrays.
+    # Guarantee non-empty completion/logprobs/env_mask arrays.
     for i in range(n):
         if not completion_ids_out[i]:
             completion_ids_out[i] = [tokenizer.eos_token_id]
             logprobs_out[i] = [0.0]
+            env_mask_out[i] = [1]
         if not prompt_ids_out[i]:
             prompt_ids_out[i] = [tokenizer.eos_token_id]
 
@@ -275,6 +306,10 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
         "prompt_ids": prompt_ids_out,
         "completion_ids": completion_ids_out,
         "logprobs": logprobs_out,
+        # env_mask: 1=action token (gradient active), 0=obs token (gradient masked).
+        # Fixes multi-turn logprob mismatch: backward pass now sees the correct
+        # context (observations included) without propagating gradient through obs.
+        "env_mask": env_mask_out,
         # Extra fields forwarded to reward function through reward_kwargs
         "episode_reward": final_rewards,
         "invalid_steps": invalid_counts,
@@ -324,6 +359,10 @@ def main() -> None:
                             "0 = all items. Requires data/train/textcraft_train_with_depth.json "
                             "(generate with src/utils/label_depths.py)."
                         ))
+    parser.add_argument("--model-path", type=str, default="",
+                        help="Path to model dir (default: models/Qwen2.5-3B-Instruct).")
+    parser.add_argument("--system-prompt", type=str, default=DEFAULT_SYSTEM_PROMPT,
+                        help="System prompt. Pass '' for models without system role (e.g. Gemma-3).")
     parser.add_argument("--run-name", type=str, default="trl_grpo_textcraft_smoke")
     parser.add_argument(
         "--max-rounds-schedule",
@@ -352,21 +391,29 @@ def main() -> None:
         MAX_ROUNDS_SCHEDULE = parse_max_rounds_schedule(args.max_rounds_schedule)
         print(f"[scaling-inter] schedule = {MAX_ROUNDS_SCHEDULE}", flush=True)
 
+    model_path = Path(args.model_path) if args.model_path else DEFAULT_MODEL_PATH
+    if not model_path.is_absolute():
+        model_path = REPO_ROOT / model_path
+    print(f"[train] Model: {model_path}", flush=True)
+
     check_server()
-    rows = build_prompt_rows(max_items=args.max_items, max_depth=args.max_depth)
+    rows = build_prompt_rows(max_items=args.max_items, max_depth=args.max_depth, system_prompt=args.system_prompt)
     dataset = Dataset.from_list(rows)
 
-    tokenizer = AutoTokenizer.from_pretrained(str(MODEL_PATH))
+    tokenizer = AutoTokenizer.from_pretrained(str(model_path))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     out_dir = REPO_ROOT / "saves" / "trl_grpo" / args.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    os.environ.setdefault("WANDB_PROJECT", "rl-gym-workout")
+
     cfg = GRPOConfig(
         output_dir=str(out_dir),
         run_name=args.run_name,
-        report_to=[],
+        # Skip wandb for smoke tests (max_steps <= 10) to avoid cluttering the project.
+        report_to=[] if args.max_steps <= 10 else ["wandb"],
         # bs=1 + grad_acc=8 avoids OOM on B200: forward pass logits = 8×seq×vocab
         # instead of 64×seq×vocab (bs=8 would OOM at 148 GB for 7664-token seqs).
         # Mathematically equivalent to bs=8 for GRPO (per-prompt advantage norm is unchanged).
@@ -377,8 +424,13 @@ def main() -> None:
         # grad_norm=1765 spike at step 35 of v2 — see WORKLOG step50 anomaly).
         max_grad_norm=1.0,
         # KL regularization: paper uses kl_loss_coef=0.001 (low_var_kl type).
-        # TRL beta is equivalent; default 0.0 means no KL penalty at all.
+        # TRL beta is equivalent; TRL already uses the same k3 estimator as verl low_var_kl.
         beta=0.001,
+        # Paper uses ppo_inner_epochs=2 (verl): each collected batch is reused twice
+        # for gradient updates. This doubles gradient updates/epoch vs num_iterations=1
+        # without additional rollout cost. Not equivalent to LR×2 because PPO clipping
+        # constrains the 2nd pass to stay close to the data-collecting policy.
+        num_iterations=2,
         use_vllm=args.use_vllm,
         max_steps=args.max_steps,
         num_generations=args.num_generations,
@@ -390,7 +442,7 @@ def main() -> None:
         # Disable saving for smoke tests (max_steps <= 10) to avoid wasting 6 GB per run.
         # For real runs: save every epoch, keep 1 checkpoint (peak disk = 12 GB during write).
         save_strategy="no" if args.max_steps <= 10 else "steps",
-        save_steps=max(1, args.max_steps // 12) if args.full_ft else 5,
+        save_steps=50 if args.full_ft else 5,
         save_total_limit=1 if args.full_ft else 3,
         save_only_model=args.full_ft,
         eval_strategy="no",
@@ -410,7 +462,7 @@ def main() -> None:
         print("[train] Full fine-tuning (no LoRA).", flush=True)
 
     trainer = GRPOTrainer(
-        model=str(MODEL_PATH),
+        model=str(model_path),
         reward_funcs=textcraft_reward,
         args=cfg,
         train_dataset=dataset,

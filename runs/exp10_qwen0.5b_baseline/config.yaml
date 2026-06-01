@@ -1,0 +1,75 @@
+name: qwen0.5b_baseline
+date: 2026-05-30
+description: >
+  Expérience avec Qwen2.5-0.5B-Instruct pour deux objectifs :
+  1. Mesurer la baseline Pass@1 sans training (comparaison avec 3B = 18/100).
+  2. Si baseline >= 10% sur depth-1, lancer un entraînement GRPO pour tester
+     si le 0.5B peut apprendre sur TextCraft à moindre coût computationnel.
+  Le 0.5B est ~6× plus petit → steps ~3× plus rapides → itération accélérée
+  pour valider des idées (curriculum, reward shaping, etc.) avant de répliquer sur 3B.
+
+algorithm: GRPO (TRL, sans vLLM)
+model: Qwen2.5-0.5B-Instruct
+model_path: models/Qwen2.5-0.5B-Instruct
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+
+training:
+  fine_tuning: Full FT (--full-ft)
+  num_generations: 8
+  num_iterations: 2
+  max_completion_length: 512
+  max_rounds: 30
+  max_steps: 4488       # 12 epochs × 374 items (identique exp7.1)
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8
+  learning_rate: 1e-6
+  beta: 0.001
+  dataset: data/train/textcraft_train.json
+
+# ── Étape 1 : baseline (pas de training) ─────────────────────────────────────
+baseline_eval_command: >
+  source ~/envs/agentgym-rl/bin/activate && python src/eval/eval_fullft.py
+    --checkpoint models/Qwen2.5-0.5B-Instruct
+    --run-name exp10_qwen0.5b_baseline
+
+# ── Étape 2 : smoke test entraînement ─────────────────────────────────────────
+smoke_command: >
+  source ~/envs/agentgym-rl/bin/activate && python src/train/train_grpo.py
+    --full-ft
+    --model-path models/Qwen2.5-0.5B-Instruct
+    --num-generations 8
+    --max-completion-length 512
+    --max-items 8
+    --max-steps 2
+    --run-name exp10_qwen0.5b_smoke
+
+# ── Étape 3 : entraînement complet (si baseline >= 10%) ───────────────────────
+command: >
+  source ~/envs/agentgym-rl/bin/activate && nohup python src/train/train_grpo.py
+    --full-ft
+    --model-path models/Qwen2.5-0.5B-Instruct
+    --num-generations 8
+    --max-completion-length 512
+    --max-items 0
+    --max-steps 4488
+    --run-name exp10_qwen0.5b_grpo
+    > logs/exp10_qwen0.5b_grpo.log 2>&1 &
+
+eval_command: >
+  python src/eval/eval_fullft.py
+    --checkpoint saves/trl_grpo/exp10_qwen0.5b_grpo/checkpoint-XXXX
+    --run-name exp10_qwen0.5b_grpo
+
+hypotheses:
+  H1: >
+    La baseline 0.5B est >= 10% sur depth-1. Si oui, GRPO peut produire
+    du signal d'apprentissage et l'expé vaut le coup.
+  H2: >
+    Si la baseline 0.5B est < 5%, le modèle ne résout rien sans training
+    → frac_reward_zero_std = 1 à chaque step → aucun signal → training inutile.
+  H3: >
+    Même avec une baseline faible, le curriculum depth (exp9-style) sur 0.5B
+    pourrait bootstrapper l'apprentissage sur depth-1 avant depth-2+.
+
+results: ~
+verdict: ~

@@ -1731,20 +1731,31 @@ Si on parallélise les N appels HTTP à chaque tour (ThreadPoolExecutor),
 le coût des appels passe de N×latence à max(latence) ≈ constante.
 - N=8 parallèle : ~40s/step (vs 115s actuel) → ×3 plus rapide
 - N=32 parallèle : ~150s/step → ×4 plus de signal pour même budget temps
-À implémenter dans rollout_func pour exp8 ou exp9.
+**À coder dans rollout_func avant de lancer exp8.** Smoke test CPU obligatoire pour
+vérifier que les résultats sont identiques (mêmes rewards, même séquence d'actions).
 
 **Mémoire GPU disponible :**
 - Actuel : 95 GB utilisés / 183 GB → 88 GB libres
 - N=16 safe : 16 traj × ~3000 tokens × vocab × 2 bytes ≈ 29 GB supplémentaires
 - N=32 safe : ~58 GB supplémentaires → reste dans les 183 GB
 
-**Décision pour exp8/exp9 : N=16** (sans rollout parallèle pour l'instant, à coder ensuite)
+**Décision pour exp8/exp9 : N=16** avec rollout HTTP parallèle (prérequis avant lancement)
 
 ### Évaluation des checkpoints full FT — pourquoi eval_fullft.py
 
 Les deux scripts d'eval existants (`eval_baseline.py`, `eval_lora.py`) utilisent **vLLM**
 pour la génération. vLLM nécessite **glibc ≥ 2.31**, mais le serveur B200/Coder a
 **glibc 2.28** → import impossible, `ImportError` immédiat.
+
+**Pourquoi vLLM ne supporte pas glibc 2.28 (Rocky Linux 8.10) :**
+vLLM distribue des wheels PyPI compilées pour `manylinux_2_31` (glibc ≥ 2.31). Deux raisons :
+1. Extensions C++ (PagedAttention, kernels CUDA) compilées avec cette cible — supporter 2.28
+   est un effort supplémentaire pour un OS en fin de vie.
+2. Public cible moderne (Ubuntu 22.04+, RHEL 9, clouds AWS/GCP/Azure).
+Compiler depuis les sources pour glibc 2.28 est possible mais très coûteux (dépendances
+transitives — triton, flash-attention — avec les mêmes contraintes).
+**Seule vraie solution** : migrer Rocky Linux 8 → Rocky Linux 9 (glibc 2.34) — à demander
+à l'infra Criteo. Déverrouillerait vLLM et diviserait le step_time par ~5 (15h/epoch → 3h).
 
 De plus, `eval_lora.py` vérifie la présence d'un `adapter_config.json` (fichier LoRA PEFT)
 qui n'existe pas dans un checkpoint full FT — il ne charge que des adapters LoRA.
@@ -1762,3 +1773,197 @@ python src/eval/eval_fullft.py \
     --run-name exp7_b200_fullft
 ```
 
+### Bug max_steps : exp7 ne fait que ~1.5 epochs, pas 12
+
+**Constat** (2026-05-27) : à step 413, le log montre `epoch: 1.104`. En faisant le
+calcul : `epoch = step / dataset_size = 413 / 374 = 1.104`. TRL GRPOTrainer compte
+chaque micro-step (1 prompt individuel) comme un "step" dans le compteur global.
+
+**Origine du bug** : `max_steps=564` a été calculé pour `bs=8` (pas de grad_acc) :
+```
+12 epochs × (374 items ÷ bs=8) = 12 × 47 = 564 steps  ← correct pour bs=8
+```
+Quand on a switché à `bs=1 + grad_acc=8` pour éviter l'OOM, le compteur de steps TRL
+a changé de sémantique : 1 step = 1 prompt (pas 1 optimizer step). Résultat :
+```
+564 steps ÷ 374 items/epoch = 1.51 epochs  ← ce qu'on fait réellement
+```
+
+**Pour 12 vraies epochs** : `max_steps = 12 × 374 = 4488`
+
+**Impact sur la réplication** : le papier entraîne 12 epochs (bs=32, N=8 sur 4 GPUs).
+Pour matcher leur nombre total de générations :
+- Papier : 12 × (374/32) = 140 optimizer steps × 256 gen/step = 35 840 générations
+- Nous (1.5 epochs) : 70 optimizer steps × 64 gen/step = 4 480 générations → **×8 moins de compute**
+- Nous (12 epochs, max_steps=4488) : 560 optimizer steps × 64 gen/step = 35 840 générations ✓
+
+**Durée estimée pour 12 epochs** :
+- Sans optimisation : 4488 × 150s ≈ **187h (7.8 jours)** — infaisable
+- Avec rollout HTTP parallèle (ThreadPoolExecutor, ~3× speedup) : 4488 × 50s ≈ **62h (2.6 jours)** — faisable
+- Avec rollout parallèle + N=16 (exp8) : même durée, ×2 de signal GRPO par step
+
+**Action** : implémenter le rollout HTTP parallèle AVANT exp8, puis fixer max_steps=4488
+pour exp8/9 afin d'entraîner 12 vraies epochs et répliquer proprement le papier.
+
+### Exp7.1 — plan et implémentation (2026-05-27)
+
+**Décision** : plutôt que de lancer une nouvelle expérience from scratch, on continue
+exp7 depuis `checkpoint-564` pour atteindre les 12 epochs du papier. Appelée **exp7.1**.
+
+**Hyperparamètres — identiques à exp7, rien ne change sauf max_steps et le rollout :**
+- `num_generations=8` (N=8, aligné papier — ne pas toucher)
+- `max_completion_length=512` (ne pas toucher)
+- `max_rounds=30` (aligné papier — ne pas toucher)
+- `learning_rate=1e-6`, `beta=0.001`, `bs=1 + grad_acc=8`
+- `max_steps=4488` (corrigé : 12 epochs × 374 items/epoch)
+- `resume_from_checkpoint=saves/trl_grpo/exp7_b200_fullft/checkpoint-564`
+
+**Rollout HTTP parallèle — implémenté dans `src/train/train_grpo.py`** :
+
+La boucle `for j, i in enumerate(active)` qui faisait les N appels HTTP séquentiels
+est remplacée par trois phases :
+
+```
+Phase 1 — decode + actions (CPU, séquentiel)
+Phase 2 — env.step() en parallèle (ThreadPoolExecutor, max_workers=N)
+Phase 3 — collect résultats + update states (CPU, séquentiel)
+```
+
+```python
+# Phase 2 — parallel HTTP calls (IO-bound, N calls simultanés)
+futures = [(executor.submit(env_clients[i].step, f"Action: {actions[i]}"), i)
+           for i in active]
+step_results = {i: fut.result() for fut, i in futures}
+```
+
+Le `ThreadPoolExecutor` est créé **une seule fois** avant la boucle `for round_idx`
+et réutilisé à chaque round (pas de overhead de création par round).
+
+**Gain attendu** : step_time ~150s → ~50s (×3), car le bottleneck HTTP
+(30 rounds × N appels × ~0.5s) passe de `N × latence` à `max(latence)`.
+
+**Durée estimée exp7.1** :
+- 3924 steps restants (564 → 4488) × ~50s/step ≈ **54h (2.3 jours)**
+
+**Prérequis avant lancement** :
+1. Exp7 terminée → `checkpoint-564` disponible
+2. Smoke test CPU validé (max-items=8, max-steps=2)
+3. Eval de checkpoint-564 lancée pour avoir le Pass@1 à 1.5 epochs
+
+**Config** : `runs/exp7.1_b200_fullft_12ep/config.yaml`
+
+**Commande de lancement** (après smoke test) :
+```bash
+source ~/envs/agentgym-rl/bin/activate
+nohup python src/train/train_grpo.py \
+    --full-ft \
+    --num-generations 8 \
+    --max-completion-length 512 \
+    --max-items 0 \
+    --max-steps 4488 \
+    --resume-from-checkpoint saves/trl_grpo/exp7_b200_fullft/checkpoint-564 \
+    --run-name exp7.1_b200_fullft_12ep \
+    > logs/exp7.1_b200_fullft_12ep.log 2>&1 &
+```
+
+
+### Vérification de la fenêtre de contexte — check_context_length.py
+
+Ajouté `src/analysis/check_context_length.py` (2026-05-30) pour vérifier qu'aucun épisode
+d'eval n'a dépassé la fenêtre de contexte de Qwen2.5-3B (32 768 tokens).
+
+**Problème** : `eval_fullft.py` passe l'historique complet à chaque round sans troncature.
+Si un épisode de 30 tours dépasse 32 768 tokens, HuggingFace tronque silencieusement le
+début du prompt — le modèle perd le contexte des premiers tours sans avertissement.
+
+**Ce que fait le script** : pour chaque JSON d'eval, reconstruit la conversation tour par
+tour, applique le chat template et compte les tokens. Signale tout épisode ayant dépassé
+la limite. Utilise uniquement le tokenizer (pas le modèle) — rapide.
+
+**Usage** :
+```bash
+source ~/envs/agentgym-rl/bin/activate
+python src/analysis/check_context_length.py \
+    --eval-dir runs/exp7.1_ckpt1598/eval_logs \
+    --tokenizer saves/trl_grpo/exp7.1_b200_fullft_12ep/checkpoint-1598
+```
+
+Fonctionne avec n'importe quel dossier d'eval_logs et n'importe quel checkpoint/tokenizer.
+
+### Exp10 — Qwen2.5-0.5B baseline (2026-06-01)
+
+**Résultat : Pass@1 = 0/100 (0%)**, mean_rounds = 30.0, tous timeouts.
+
+Le 0.5B n'a pas la capacité minimale pour résoudre un seul item TextCraft sans training.
+Entraînement GRPO inutile : frac_reward_zero_std = 1 garanti à chaque step → aucun signal.
+
+**Benchmark multi-modèles lancé** (run_benchmark_baselines.sh, PID 548892) :
+Llama-3.2-1B → SmolLM2-1.7B → Gemma-3-1B → DeepSeek-R1-Distill-Qwen-1.5B.
+Stratégie : télécharge → eval → supprime → suivant (contrainte disque 6.4 Go libres).
+Logs : logs/benchmark_baselines.log. Résultats dans runs/expXX_*/eval_logs/.
+
+**Changements code associés :**
+- `--system-prompt` ajouté à train_grpo.py et eval_fullft.py (configurable par modèle)
+- `--model-path` déjà présent dans train_grpo.py
+- Gemma-3 : system_prompt="" → pas de rôle system dans les messages
+
+### Bug critique GRPO multi-tour — fix env_mask (2026-06-01)
+
+**Problème identifié** : mismatch logprob entre génération et backward pass.
+
+La `textcraft_rollout_func` génère tour par tour avec le contexte complet
+(observations incluses), mais retournait à TRL :
+- `prompt_ids` = seulement le prompt du round 1
+- `completion_ids` = tokens action de tous les rounds, **sans les observations**
+
+TRL recomputait les logprobs de action_2, action_3, ... **sans** obs_1, obs_2, ...
+→ ratio π_actuelle/π_ancienne faux → gradient faux → le modèle régresse.
+C'est ce qui explique le 17% < 18% baseline après 4+ epochs de training.
+
+**Fix implémenté dans `src/train/train_grpo.py`** :
+
+On inclut désormais les tokens d'observation dans `completion_ids` avec `env_mask=0`
+(gradient bloqué sur ces tokens via le mécanisme `tool_mask` de TRL, ligne 2065).
+
+Structure après fix :
+```
+completion_ids = [action_1 | obs_1 | action_2 | obs_2 | ... | action_T]
+env_mask       = [  1...1  |  0...0 |  1...1  |  0...0 | ...  |  1...1 ]
+logprobs       = [lp(a1)   |  0.0.. | lp(a2)  |  0.0.. | ...  | lp(aT) ]
+```
+
+Le backward pass voit le bon contexte, gradient uniquement sur les tokens action.
+TRL supporte nativement `env_mask` (retourné dans le dict de `rollout_func`).
+
+**Validation exp7.2** (50 steps depuis modèle de base, run_name=exp7.2_envmask_fix) :
+- Step 11 : reward=0.625 (5/8 épisodes résolus), loss=0.84, grad_norm=5.1
+- Step 12 : reward=0.625, loss=0.998, grad_norm=6.4
+Signal positif dès les premiers steps — à comparer avec exp7 (première reward
+positive observée autour du step 10-20 depuis la baseline).
+
+**Note** : `completions/clipped_ratio=1` dans les logs TRL — artefact de métrique :
+TRL marque les completions comme "clipped" car leur longueur (action+obs) dépasse
+max_completion_length=512, mais ne les tronque pas réellement (num_tokens cohérent
+avec la taille complète). Le gradient est bien calculé sur le bon contexte.
+
+### Prochaines expériences baselines petits modèles
+
+Suite au 0/100 de Qwen2.5-0.5B, benchmark des modèles suivants (scripts prêts,
+configs dans runs/expXX_*_baseline/) :
+
+| Exp | Modèle | HF repo | Sys prompt | Statut |
+|---|---|---|---|---|
+| exp10 | Qwen2.5-0.5B-Instruct | Qwen/Qwen2.5-0.5B-Instruct | Qwen standard | **0/100 — trop petit** |
+| exp11 | Llama-3.2-1B-Instruct | meta-llama/Llama-3.2-1B-Instruct | "You are a helpful assistant." | bloqué (gated, besoin HF token) |
+| exp12 | SmolLM2-1.7B-Instruct | HuggingFaceTB/SmolLM2-1.7B-Instruct | "You are a helpful AI assistant." | à lancer |
+| exp13 | Gemma-3-1B-it | google/gemma-3-1b-it | "" (no system role) | à lancer |
+| exp14 | DeepSeek-R1-Distill-Qwen-1.5B | deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B | "You are a helpful assistant." | à lancer |
+
+Script de benchmark séquentiel : `src/train/run_benchmark_baselines.sh`
+(télécharge → eval → supprime → modèle suivant).
+
+Pour Llama : accepter la licence sur huggingface.co/meta-llama/Llama-3.2-1B-Instruct
+puis `export HF_TOKEN=<token>` avant de lancer le script.
+
+Code : `--system-prompt` ajouté à `eval_fullft.py` et `train_grpo.py` pour
+supporter les modèles hors-Qwen (dont Gemma qui ne prend pas de rôle system).

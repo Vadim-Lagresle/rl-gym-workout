@@ -59,6 +59,7 @@ rl-gym-workout/
 - `external/USAGE.md` — quels fichiers on utilise dans les dépendances externes
 - `external/agentgym_rl_paper/train/AgentGym-RL/textcraft_train.4gpu.sh` — script training verl 4-GPU
 - `docs/RESULTS.md` — tableau de résultats structuré (référence)
+- `docs/GERRIT_WORKFLOW.md` — comment pousser le snapshot hebdo sur Gerrit (`research/vadim-lagresle/`)
 - `WORKLOG.md` — contexte de session, procédure de reprise
 - `external/AgentGym-RL/verl/workers/rollout/agent_vllm_rollout/vllm_rollout.py` — rollout multi-tour
 - `external/AgentGym-RL/verl/agent_trainer/ppo/ray_trainer.py` — boucle PPO + ScalingInter
@@ -116,5 +117,6 @@ cd ~/rl-gym-workout
 - Toujours vérifier le code **avant** de lancer sur les gros GPU (B200 192 Go) — les ressources sont rares.
 - `gcloud compute config-ssh` écrase parfois le `RemoteForward 8443` dans `~/.ssh/config` sur le Mac.
 - Le remote GitLab pointe sur `https://gitlab.crto.in:8443/v.lagresle/rl-gym-workout.git` (tunnel SSH requis).
+- Push hebdo sur **Gerrit** (en plus du daily GitLab) : clone séparé dans `~/ai-agentic-commerce-incubation/`, sous-dossier `research/vadim-lagresle/`. Détails dans `docs/GERRIT_WORKFLOW.md`.
 - Les nouvelles expés (exp7+) tournent sur **B200** avec **TRL + vLLM** — ne pas utiliser verl pour les nouveaux runs.
 - exp9 (curriculum) nécessite `data/train/textcraft_train_with_depth.json` généré par `src/utils/label_depths.py` dans l'env `agentenv-textcraft`.

@@ -1,0 +1,24 @@
+name: gemma3_baseline
+date: 2026-05-30
+model: google/gemma-3-1b-it
+model_path: models/Gemma-3-1B-it
+system_prompt: ""
+description: >
+  Baseline Pass@1 de Gemma-3-1B-it sur TextCraft (sans training).
+  Gemma-3 n'accepte pas de message system dans son chat template — on passe
+  system_prompt="" pour ne pas ajouter de rôle system.
+
+download_command: >
+  source ~/envs/agentgym-rl/bin/activate && python -c "
+  from huggingface_hub import snapshot_download
+  snapshot_download('google/gemma-3-1b-it',
+      local_dir='models/Gemma-3-1B-it', ignore_patterns=['*.pt','*.gguf'])
+  "
+
+baseline_eval_command: >
+  source ~/envs/agentgym-rl/bin/activate && python src/eval/eval_fullft.py
+    --checkpoint models/Gemma-3-1B-it
+    --run-name exp13_gemma3_baseline
+    --system-prompt ""
+
+results: ~

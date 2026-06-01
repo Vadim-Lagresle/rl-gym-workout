@@ -1,0 +1,71 @@
+name: b200_fullft_12ep
+date: ~
+description: >
+  Continuation de exp7 à partir du checkpoint-564 (~1.5 epochs) pour atteindre
+  les 12 epochs du papier AgentGym-RL. Mêmes hyperparamètres qu'exp7 (N=8,
+  full FT, max_rounds=30, max_completion_length=512, lr=1e-6) + rollout HTTP
+  parallèle (ThreadPoolExecutor) pour réduire le step time de ~150s à ~50s.
+  Objectif : répliquer proprement le compute du papier (35 840 générations
+  = 12 × (374/32) × 256 gen/step papier ≈ 4488 steps × 64 gen/step chez nous).
+
+algorithm: GRPO (TRL, sans vLLM) + rollout HTTP parallèle
+model: Qwen2.5-3B-Instruct
+script: src/train/train_grpo.py
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+
+training:
+  fine_tuning: Full FT (--full-ft)
+  num_generations: 8        # identique exp7 — N=8 comme le papier
+  num_iterations: 2         # aligné papier (ppo_inner_epochs=2 dans verl) — 2× grad updates/epoch
+  max_completion_length: 512  # inchangé — ne pas toucher
+  max_rounds: 30            # inchangé — aligné papier
+  max_steps: 4488           # 12 epochs × 374 items/epoch (corrigé depuis exp7)
+  resume_from_checkpoint: saves/trl_grpo/exp7.1_b200_fullft_12ep/checkpoint-752  # updated after intermediate stop
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 8   # effective bs = 8, équivalent papier
+  learning_rate: 1e-6
+  beta: 0.001               # KL coefficient, aligné papier
+  dataset: data/train/textcraft_train.json  # 374 items, tous depths
+
+prerequisites:
+  - exp7 terminée (checkpoint-564 disponible dans saves/trl_grpo/exp7_b200_fullft/)
+  - smoke test du rollout parallèle validé CPU avant lancement GPU
+
+smoke_command: >
+  source ~/envs/agentgym-rl/bin/activate && python src/train/train_grpo.py
+    --full-ft
+    --num-generations 8
+    --max-completion-length 512
+    --max-items 8
+    --max-steps 2
+    --run-name exp7.1_smoke
+
+command: >
+  source ~/envs/agentgym-rl/bin/activate && nohup python src/train/train_grpo.py
+    --full-ft
+    --num-generations 8
+    --max-completion-length 512
+    --max-items 0
+    --max-steps 4488
+    --resume-from-checkpoint saves/trl_grpo/exp7_b200_fullft/checkpoint-564
+    --run-name exp7.1_b200_fullft_12ep
+    > logs/exp7.1_b200_fullft_12ep.log 2>&1 &
+
+eval_command: >
+  python src/eval/eval_fullft.py
+    --checkpoint saves/trl_grpo/exp7.1_b200_fullft_12ep/checkpoint-4488
+    --run-name exp7.1_b200_fullft_12ep
+
+duration_estimate: >
+  3924 steps restants (564→4488) × ~50s/step (avec rollout parallèle) ≈ 54h (2.3 jours)
+
+hypotheses:
+  H1: >
+    12 epochs de GRPO full FT avec N=8 devraient reproduire les conditions du papier
+    et atteindre la zone 75/100 sur l'ensemble de test TextCraft.
+  H2: >
+    Si exp7.1 stagne après exp7 (pas de gain sur les 10.5 epochs supplémentaires),
+    le problème est ailleurs que le compute (capacité du modèle ou reward sparsity).
+
+results: ~
+verdict: ~
