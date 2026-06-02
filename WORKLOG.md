@@ -2,6 +2,17 @@
 
 Journal de bord pour reprendre le projet sans perdre de contexte.
 
+## IMPORTANT — Rôle de Claude (note du 2026-06-02)
+
+Claude ne prend PAS le lead sur les décisions techniques ou scientifiques. Son rôle :
+- Expliquer le code, l'architecture, les relations entre fichiers
+- Donner des idées et options quand demandé, avec les pour/contre
+- Guider vers les bons fichiers / commandes pour que Vadim comprenne et décide
+- Exécuter ce que Vadim demande, pas ce que Claude pense être bien
+
+Ce qui a merdé : Claude a enchaîné vLLM, 8-bit Adam, env_mask, etc. de sa propre initiative
+sans que la direction soit validée. Résultat : beaucoup de code, pas de réplication papier.
+
 > **Récap de la session 2026-05-05** (smoke tests, premier eval, gotchas
 > détaillés) : voir [`docs/SESSION_2026-05-05.md`](docs/SESSION_2026-05-05.md).
 
@@ -1967,3 +1978,48 @@ puis `export HF_TOKEN=<token>` avant de lancer le script.
 
 Code : `--system-prompt` ajouté à `eval_fullft.py` et `train_grpo.py` pour
 supporter les modèles hors-Qwen (dont Gemma qui ne prend pas de rôle system).
+
+### vLLM 0.9.1 — installation et validation (2026-06-01)
+
+**Résultat : vLLM 0.9.1 fonctionne sur B200 avec glibc 2.28.**
+
+Deux patches mineurs nécessaires pour compatibilité avec transformers 5.9.0 :
+1. `vllm/transformers_utils/configs/ovis.py` : `AutoConfig.register("aimv2")` → try/except
+   (déjà enregistré dans transformers 5.9)
+2. `vllm/transformers_utils/tokenizer.py` : `tokenizer.all_special_tokens_extended`
+   → `getattr(..., 'all_special_tokens_extended', tokenizer.all_special_tokens)`
+   (attribut renommé dans transformers 5.9)
+
+Attention : vllm installe `torch-2.7.0+cu126` par défaut → casse le support B200.
+Après install vllm, toujours restaurer : `pip install torch==2.7.1+cu128 --index-url https://download.pytorch.org/whl/cu128 --no-deps`
+
+**Validation :** génération Qwen2.5-3B-Instruct via vLLM → 156 tokens/s, réponse correcte.
+
+**Prochaine étape : vLLM pour l'eval (eval_vllm.py)**
+Remplacer HF generate() par appels HTTP au serveur vLLM avec prefix caching.
+Gain estimé : 35 min → ~5 min pour 100 items d'eval (×7 speedup).
+
+### vLLM — analyse speedup et plan intégration training (2026-06-01)
+
+**Résultats benchmark eval (10 items) :**
+- eval_fullft.py (HF generate) : 40.8s/item → 68 min/100 items
+- eval_vllm.py (vLLM HTTP) : 14.3s/item → 24 min/100 items → **×2.9 speedup**
+
+**Analyse :** le vrai gain est sur la génération (×6), mais les appels HTTP TextCraft
+(~9s/épisode, incompressibles) diluent le speedup global.
+
+**Décode = bottleneck incompressible :** chaque token est généré séquentiellement
+(autorégressif par design). Sur B200 : ~150 tokens/s à batch=1. En batchant N=8
+épisodes, le throughput total monte à ~1000+ tokens/s (poids lus une fois pour 8) →
+~0.5-0.54s par round constant, quelle que soit la taille du contexte (prefix caching).
+
+**Plan intégration training :** vLLM en in-process (`LLM()` object, pas serveur HTTP)
+avec sync des poids TRL → vLLM après chaque step.
+- vLLM: gpu_memory_utilization=0.30 → ~55 Go (modèle 6 + KV cache 49)
+- TRL: ~39 Go (modèle 6 + optimizer 12 + gradients/activations)
+- Total: ~94 Go / 183 Go → confortable
+
+Speedup attendu en training : 30 rounds × 8 épisodes en batch vLLM → ~15s génération
+(vs ~120s actuellement) → step_time ~40s (vs ~150s) → **×3.7 speedup**.
+
+**Fichiers :** `src/eval/eval_vllm.py`, `src/utils/start_vllm_server.sh`

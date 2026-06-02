@@ -1,17 +1,9 @@
 # CLAUDE.md — rl-gym-workout
 
-## Briefing automatique de début de session
-
-**A chaque nouvelle conversation, faire ceci en premier sans attendre que Vadim le demande :**
-1. Lire `WORKLOG.md`
-2. Lire `docs/RESULTS.md`
-3. Produire un rapport court (10-15 lignes max) avec : dernière expérience connue, résultat, prochaine étape identifiée, et une question ou point de vigilance si pertinent.
-
 
 ## Contexte du projet
 
-Stage de recherche (2026, Criteo CAIL) sur les **agents LLM self-improving par RL multi-tour**.
-Encadrants : Alberto Lumbreras, Patrick Gallinari.
+Travail de recherche sur les **agents LLM self-improving par RL multi-tour**.
 
 **Question centrale** : pourquoi les performances s'effondrent à depth 4 sur TextCraft, et
 comment y remédier avec les outils modernes (curriculum, SCPO, BOND, CoT, mix SFT+RL) ?
@@ -53,16 +45,15 @@ rl-gym-workout/
 ```
 
 **Fichiers clés à connaître :**
-- `src/train/train_grpo.py` — script TRL GRPO (toutes les versions v2→v4)
-- `src/eval/eval_baseline.py` / `src/eval/eval_lora.py` — évaluation baseline et LoRA
+- `src/train/train_grpo.py` — **script d'entraînement actif** (TRL GRPO, toujours utiliser celui-là)
+- `src/eval/eval_vllm.py` — **script d'évaluation actif** (vLLM via serveur HTTP, ~15 min/100 items)
+- `src/utils/start_vllm_server.sh` — démarre le serveur vLLM sur un checkpoint (port 8001)
+- `src/eval/eval_fullft.py` — évaluation lente via HuggingFace generate() — **NE PAS UTILISER**, remplacé par eval_vllm.py
 - `runs/expN_*/config.yaml` — config, hyperparamètres et résultats de chaque run
 - `external/USAGE.md` — quels fichiers on utilise dans les dépendances externes
-- `external/agentgym_rl_paper/train/AgentGym-RL/textcraft_train.4gpu.sh` — script training verl 4-GPU
 - `docs/RESULTS.md` — tableau de résultats structuré (référence)
 - `docs/GERRIT_WORKFLOW.md` — comment pousser le snapshot hebdo sur Gerrit (`research/vadim-lagresle/`)
 - `WORKLOG.md` — contexte de session, procédure de reprise
-- `external/AgentGym-RL/verl/workers/rollout/agent_vllm_rollout/vllm_rollout.py` — rollout multi-tour
-- `external/AgentGym-RL/verl/agent_trainer/ppo/ray_trainer.py` — boucle PPO + ScalingInter
 
 ## Résultats actuels (résumé)
 
@@ -75,8 +66,6 @@ rl-gym-workout/
 | GRPO v4 ScalingInter sparse 0/1 | 14 | régression |
 | **Papier AgentGym-RL-3B** | **75** | objectif |
 
-**Gap de 57 points** dû principalement à : LoRA vs Full FT, N=2 vs N=8 (→ 70% des steps
-sans gradient à N=2 et p≈0.18), batch=1 vs 32, max_tokens=128 vs 512.
 
 ## Commandes de démarrage de session
 
@@ -90,11 +79,54 @@ conda activate agentgym-rl
 cd ~/rl-gym-workout
 ```
 
+## Stack d'évaluation (à utiliser systématiquement)
+
+**Toujours utiliser `eval_vllm.py` + serveur vLLM, jamais `eval_fullft.py` directement.**
+
+vLLM est opérationnel sur ce serveur (glibc 2.28) grâce à la version 0.9.1 manylinux1 du mirror
+Criteo PyPI + 2 patches Python. Voir `docs/hebdo/5juin/session_2026-06-01.md` pour les détails.
+
+```bash
+# Étape 1 — lancer le serveur vLLM sur le checkpoint à évaluer
+bash src/utils/start_vllm_server.sh saves/trl_grpo/<run>/checkpoint-<N>
+
+# Étape 2 — eval (100 items, ~15 min)
+python src/eval/eval_vllm.py \
+    --model saves/trl_grpo/<run>/checkpoint-<N> \
+    --run-name <run_name>
+
+# Arrêter le serveur après
+kill $(cat /tmp/vllm_server.pid)
+```
+
+## Stack d'entraînement (à utiliser systématiquement)
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+nohup python src/train/train_grpo.py \
+    --full-ft \
+    --num-generations 8 \
+    --max-completion-length 512 \
+    --max-items 0 \
+    --max-steps <N> \
+    --use-vllm-inprocess \
+    --run-name <run_name> \
+    > logs/<run_name>.log 2>&1 &
+```
+
+**Paramètres clés actuels** (validés sur B200, ne pas changer sans raison) :
+- `--full-ft` : full fine-tuning (pas LoRA)
+- `--use-vllm-inprocess` : vLLM in-process avec KV cache (×6 vs HF generate)
+- `optim=adamw_bnb_8bit` : 8-bit Adam (libère ~18 Go vs fp32 Adam)
+- `gpu_memory_utilization=0.17` pour vLLM (marge suffisante pour les saves checkpoint ~8.4 Go)
+- `attn_implementation=sdpa` : attention optimisée PyTorch (flash-attn bloqué par glibc 2.28)
+
 ## Philosophie de travail avec Claude
 
 **Une tâche à la fois, expliquée avant d'être exécutée.**
 
-- Je (Claude) propose ce que je vais faire et pourquoi, tu valides avant que je code.
+- Je (Claude) ai un rôle dorénavant d'aide, de conseil, d'explication, de proposition de pistes, mais plus de leader sur toute une stratégie, et ce certainement pas sur les aspects scientifiques. Pour du changement de code, mon rôle est de bien t'expliquer les fichiers, les fonctions, les libraiires, l'architecture et les appels à fonction. Toujours privilégier la pédagogie à un lead perso sur un problème. 
+- Je (Claude) propose ce que je vais faire et pourquoi, tu  valides avant que je code.
 - On ne fait pas de grosse refacto ou d'abstraction sans raison explicite.
 - Les scripts restent simples, lisibles, avec le minimum de dépendances.
 - Quand je modifie quelque chose, je dis exactement quelle ligne change et pourquoi.
@@ -103,7 +135,7 @@ cd ~/rl-gym-workout
 ## Directions de recherche en cours
 
 1. **Comprendre depth 4** — isoler pourquoi 0/100 même après training (papier Table 3)
-2. **Répliquer le papier** — run verl multi-GPU avec les vrais hyperparamètres (N=8, Full FT, FSDP)
+2. **Répliquer le papier** — run trl qui reproduit leur code verl multi-GPU avec les vrais hyperparamètres (N=8, Full FT, FSDP)
 3. **Idées à tester** (dans l'ordre croissant de complexité) :
    - CoT structuré au tour 1 (plan explicite avant les actions)
    - Curriculum de difficulté (depth 1→2→3→4)

@@ -24,6 +24,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+import torch
+
 import requests # HTTP client for env interaction in rollout_func
 from datasets import Dataset # transforms jsons into datasets for trl
 from transformers import AutoTokenizer # tokenizer of Qwen 2.5 3B
@@ -40,6 +42,10 @@ DEFAULT_MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
 TRAIN_PATH = REPO_ROOT / "data" / "train" / "textcraft_train.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 
+
+# In-process vLLM engine (None = use HF _generate_single_turn).
+# Set in main() when --use-vllm-inprocess is passed.
+VLLM_LLM: Any = None
 
 # Constants and utils for the interactive rollout and reward shaping.
 DEFAULT_SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
@@ -167,6 +173,87 @@ def first_action_or_empty(text: str) -> str:
     return acts[0] if acts else ""
 
 
+_VLLM_SYNC_STEP_COUNT = 0
+_VLLM_SYNC_EVERY = 5    # reload vLLM weights every N steps — must be small to avoid
+                         # gradient explosion from stale generation policy (kl diverges in ~10 steps)
+_VLLM_WEIGHT_TMP = "/tmp/vllm_weight_sync"
+
+
+def _sync_trl_to_vllm(trl_model: Any) -> None:
+    """Periodic weight sync: every N steps, save TRL weights and reload vLLM model.
+
+    vLLM 0.9.1 V1 runs in a separate subprocess (SyncMPClient), so direct memory
+    copy is not possible. Instead, we save TRL's state_dict every _VLLM_SYNC_EVERY
+    steps, delete the vLLM engine, and recreate it with the new weights.
+    Overhead: ~15s reload / (50 steps × 40s) = ~0.7%.
+    """
+    global _VLLM_SYNC_STEP_COUNT, VLLM_LLM
+    if VLLM_LLM is None:
+        return
+    _VLLM_SYNC_STEP_COUNT += 1
+    if _VLLM_SYNC_STEP_COUNT % _VLLM_SYNC_EVERY != 0:
+        return
+    try:
+        import shutil
+        from vllm import LLM
+        print(f"[vllm_sync] step {_VLLM_SYNC_STEP_COUNT} — sauvegarde poids TRL vers {_VLLM_WEIGHT_TMP}", flush=True)
+        trl_model.save_pretrained(_VLLM_WEIGHT_TMP)
+        # Reload tokenizer files from original model
+        orig_cfg = VLLM_LLM.llm_engine.model_config.model
+        for f in Path(orig_cfg).glob("tokenizer*"):
+            shutil.copy2(f, _VLLM_WEIGHT_TMP)
+        print("[vllm_sync] Rechargement vLLM avec nouveaux poids...", flush=True)
+        vllm_config = VLLM_LLM.llm_engine.vllm_config
+        gpu_util = vllm_config.cache_config.gpu_memory_utilization
+        max_len = vllm_config.model_config.max_model_len
+        del VLLM_LLM
+        torch.cuda.empty_cache()
+        VLLM_LLM = LLM(
+            model=_VLLM_WEIGHT_TMP,
+            dtype="bfloat16",
+            gpu_memory_utilization=gpu_util,
+            max_model_len=max_len,
+            enable_prefix_caching=True,
+            trust_remote_code=True,
+        )
+        print(f"[vllm_sync] vLLM rechargé avec les poids du step {_VLLM_SYNC_STEP_COUNT}.", flush=True)
+    except Exception as e:
+        print(f"[vllm_sync] weight sync failed: {e}", flush=True)
+
+
+def _vllm_generate_round(tokenizer: Any, states: list, active: list[int],
+                          max_tokens: int) -> tuple[list[list[int]], list[list[float]]]:
+    """Generate one round for all active episodes via in-process vLLM (batched)."""
+    from vllm import SamplingParams
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=1.0,
+        top_p=1.0,
+        logprobs=1,  # top-1 logprob = logprob of chosen token
+    )
+    prompts = [
+        tokenizer.apply_chat_template(states[i], tokenize=False, add_generation_prompt=True)
+        for i in active
+    ]
+    outputs = VLLM_LLM.generate(prompts, sampling_params, use_tqdm=False)
+    ids_list, lps_list = [], []
+    for out in outputs:
+        comp = out.outputs[0]
+        ids = list(comp.token_ids)
+        lps = [list(lp.values())[0].logprob for lp in (comp.logprobs or [])]
+        ids_list.append(ids)
+        lps_list.append(lps)
+    return ids_list, lps_list
+
+
+class VLLMWeightSyncCallback:
+    """TRL TrainerCallback-compatible: syncs TRL model weights to vLLM after each step."""
+    def on_step_end(self, args: Any, state: Any, control: Any,
+                    model: Any = None, **kwargs: Any) -> None:
+        if model is not None:
+            _sync_trl_to_vllm(model)
+
+
 def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTrainer) -> dict[str, Any]:
     """True interactive rollout: generate -> env.step -> observation -> repeat."""
     tokenizer = trainer.processing_class
@@ -226,10 +313,16 @@ def textcraft_rollout_func(prompts: list[list[dict[str, str]]], trainer: GRPOTra
                 if round_idx == 0:
                     prompt_ids_out[i] = prompt_ids
 
-            # Use trainer internal generator to get completion token IDs + per-token logprobs.
-            round_completion_ids, round_logprobs = trainer._generate_single_turn(
-                round_prompt_ids, images=None, multimodal_fields={}
-            )
+            if VLLM_LLM is not None:
+                # vLLM in-process: batch all active episodes in one call (prefix caching).
+                round_completion_ids, round_logprobs = _vllm_generate_round(
+                    tokenizer, states, active, max_tokens=trainer.args.max_completion_length
+                )
+            else:
+                # HF _generate_single_turn: re-encodes full context each round.
+                round_completion_ids, round_logprobs = trainer._generate_single_turn(
+                    round_prompt_ids, images=None, multimodal_fields={}
+                )
 
             # Phase 1 — decode completions and extract actions (CPU, sequential).
             actions: dict[int, str] = {}
@@ -375,6 +468,9 @@ def main() -> None:
         ),
     )
     parser.add_argument("--use-vllm", action="store_true", default=False)
+    parser.add_argument("--use-vllm-inprocess", action="store_true", default=False,
+                        help="Use in-process vLLM for generation (faster, prefix caching). "
+                             "Requires vllm installed. Weights synced to vLLM after each step.")
     parser.add_argument(
         "--resume-from-checkpoint",
         type=str,
@@ -390,6 +486,23 @@ def main() -> None:
         global MAX_ROUNDS_SCHEDULE
         MAX_ROUNDS_SCHEDULE = parse_max_rounds_schedule(args.max_rounds_schedule)
         print(f"[scaling-inter] schedule = {MAX_ROUNDS_SCHEDULE}", flush=True)
+
+    if args.use_vllm_inprocess:
+        global VLLM_LLM
+        from vllm import LLM
+        model_path_for_vllm = str(Path(args.model_path) if args.model_path else DEFAULT_MODEL_PATH)
+        if not Path(model_path_for_vllm).is_absolute():
+            model_path_for_vllm = str(REPO_ROOT / model_path_for_vllm)
+        print(f"[vllm] Chargement vLLM in-process depuis {model_path_for_vllm} ...", flush=True)
+        VLLM_LLM = LLM(
+            model=model_path_for_vllm,
+            dtype="bfloat16",
+            gpu_memory_utilization=0.17,  # 0.20 laissait trop peu de marge pendant les saves checkpoint (~8 GiB)
+            max_model_len=16384,
+            enable_prefix_caching=True,
+            trust_remote_code=True,
+        )
+        print("[vllm] vLLM prêt.", flush=True)
 
     model_path = Path(args.model_path) if args.model_path else DEFAULT_MODEL_PATH
     if not model_path.is_absolute():
@@ -419,6 +532,9 @@ def main() -> None:
         # Mathematically equivalent to bs=8 for GRPO (per-prompt advantage norm is unchanged).
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
+        # 8-bit Adam: optimizer states (momentum + variance) en int8 au lieu de fp32.
+        # Économie : 3B × 2 états × (4→1 octet) = ~18 Go GPU libérés.
+        optim="adamw_bnb_8bit",
         learning_rate=1e-6,
         # Explicit clip (default is also 1.0, but make intent clear after the
         # grad_norm=1765 spike at step 35 of v2 — see WORKLOG step50 anomaly).
@@ -440,14 +556,15 @@ def main() -> None:
         bf16=True,
         logging_steps=1,
         # Disable saving for smoke tests (max_steps <= 10) to avoid wasting 6 GB per run.
-        # For real runs: save every epoch, keep 1 checkpoint (peak disk = 12 GB during write).
+        # For real runs: save every ~epoch, keep 1 checkpoint (peak disk = 12 GB during write).
         save_strategy="no" if args.max_steps <= 10 else "steps",
         save_steps=50 if args.full_ft else 5,
         save_total_limit=1 if args.full_ft else 3,
         save_only_model=args.full_ft,
         eval_strategy="no",
         gradient_checkpointing=True,
-        model_init_kwargs={"dtype": "bfloat16", "low_cpu_mem_usage": True},
+        model_init_kwargs={"dtype": "bfloat16", "low_cpu_mem_usage": True,
+                           "attn_implementation": "sdpa"},   # flash_attn bloqué (glibc 2.28 < 2.32); sdpa = PyTorch built-in efficient attention
     )
 
     peft_config = None if args.full_ft else LoraConfig(
@@ -461,6 +578,75 @@ def main() -> None:
     if args.full_ft:
         print("[train] Full fine-tuning (no LoRA).", flush=True)
 
+    callbacks = []
+
+    from transformers import TrainerCallback
+    class _MemDiagCB(TrainerCallback):
+        """Loggue un breakdown mémoire GPU détaillé toutes les 50 steps.
+
+        Distingue :
+          - PyTorch alloué/réservé  → torch.cuda.memory_stats()
+          - États bitsandbytes      → itère optimizer.state (stockés hors pool PyTorch)
+          - nvidia-smi (process)    → mémoire totale vue par le driver CUDA
+        """
+        def on_step_end(self, targs, state, control, model=None, optimizer=None, **kwargs):
+            if state.global_step % 50 != 0:
+                return
+            import subprocess, torch
+            torch_alloc  = torch.cuda.memory_allocated() / 1024**3
+            torch_reserv = torch.cuda.memory_reserved()  / 1024**3
+
+            # États bitsandbytes (int8) — hors pool PyTorch
+            bnb_bytes = 0
+            if optimizer is not None:
+                for pg in optimizer.param_groups:
+                    for p in pg["params"]:
+                        s = optimizer.state.get(p, {})
+                        for v in s.values():
+                            if hasattr(v, "nbytes"):
+                                bnb_bytes += v.nbytes
+                            elif hasattr(v, "element_size") and hasattr(v, "numel"):
+                                bnb_bytes += v.element_size() * v.numel()
+            bnb_gib = bnb_bytes / 1024**3
+
+            # Mémoire totale du process vue par le driver (nvidia-smi)
+            try:
+                out = subprocess.check_output(
+                    ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+                     "--format=csv,noheader,nounits"], text=True)
+                import os; pid = os.getpid()
+                driver_gib = next(
+                    (int(row.split(",")[1]) / 1024
+                     for row in out.strip().splitlines()
+                     if row.split(",")[0].strip() == str(pid)),
+                    None)
+            except Exception:
+                driver_gib = None
+
+            phantom = (driver_gib - torch_alloc - bnb_gib) if driver_gib else None
+            print(
+                f"[mem step={state.global_step}] "
+                f"torch_alloc={torch_alloc:.1f} GiB  "
+                f"torch_reserved={torch_reserv:.1f} GiB  "
+                f"bnb_states={bnb_gib:.1f} GiB  "
+                f"driver_total={driver_gib:.1f} GiB  "
+                f"phantom(driver-torch-bnb)={phantom:.1f} GiB"
+                if phantom is not None else
+                f"[mem step={state.global_step}] "
+                f"torch_alloc={torch_alloc:.1f} GiB  "
+                f"bnb_states={bnb_gib:.1f} GiB",
+                flush=True,
+            )
+    callbacks.append(_MemDiagCB())
+
+    if args.use_vllm_inprocess:
+        class _VLLMSyncCB(TrainerCallback):
+            def on_step_end(self, args, state, control, model=None, **kwargs):
+                if model is not None:
+                    _sync_trl_to_vllm(model)
+        callbacks.append(_VLLMSyncCB())
+        print("[vllm] VLLMWeightSyncCallback enregistré.", flush=True)
+
     trainer = GRPOTrainer(
         model=str(model_path),
         reward_funcs=textcraft_reward,
@@ -469,6 +655,7 @@ def main() -> None:
         processing_class=tokenizer,
         peft_config=peft_config,
         rollout_func=textcraft_rollout_func,
+        callbacks=callbacks if callbacks else None,
     )
 
     resume = args.resume_from_checkpoint if args.resume_from_checkpoint else None

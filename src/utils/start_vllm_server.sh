@@ -1,0 +1,45 @@
+#!/bin/bash
+# Lance un serveur vLLM compatible OpenAI sur le port 8001.
+# Usage : bash src/utils/start_vllm_server.sh <chemin_checkpoint>
+# Exemple : bash src/utils/start_vllm_server.sh models/Qwen2.5-3B-Instruct
+#
+# Le serveur tourne en arrière-plan. Pour l'arrêter : kill $(cat /tmp/vllm_server.pid)
+# Vérification : curl http://localhost:8001/health
+
+MODEL_PATH="${1:-models/Qwen2.5-3B-Instruct}"
+PORT=8001
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+PYTHON="$HOME/envs/agentgym-rl/bin/python"
+
+# Chemin absolu si relatif
+if [[ "${MODEL_PATH}" != /* ]]; then
+    MODEL_PATH="$REPO_ROOT/$MODEL_PATH"
+fi
+
+echo "[vllm] Démarrage serveur sur port $PORT avec modèle : $MODEL_PATH"
+echo "[vllm] Logs : /tmp/vllm_server.log"
+
+nohup "$PYTHON" -m vllm.entrypoints.openai.api_server \
+    --model "$MODEL_PATH" \
+    --port "$PORT" \
+    --dtype bfloat16 \
+    --gpu-memory-utilization 0.45 \
+    --max-model-len 16384 \
+    --enable-prefix-caching \
+    --trust-remote-code \
+    > /tmp/vllm_server.log 2>&1 &
+
+echo $! > /tmp/vllm_server.pid
+echo "[vllm] PID : $! (sauvegardé dans /tmp/vllm_server.pid)"
+echo "[vllm] Attente démarrage..."
+
+for i in $(seq 1 30); do
+    sleep 2
+    if curl -s http://localhost:$PORT/health > /dev/null 2>&1; then
+        echo "[vllm] Serveur prêt sur http://localhost:$PORT"
+        exit 0
+    fi
+done
+
+echo "[vllm] TIMEOUT — vérifier /tmp/vllm_server.log"
+exit 1
