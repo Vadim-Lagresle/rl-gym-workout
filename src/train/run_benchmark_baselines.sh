@@ -30,12 +30,16 @@ snapshot_download('$repo_id', local_dir='$REPO_ROOT/$local_dir', ignore_patterns
 print('Download OK')
 "
 
-    # Eval baseline
+    # Eval baseline (serveur vLLM)
+    echo "[benchmark] Démarrage serveur vLLM ($(date -u))"
+    bash "$REPO_ROOT/src/utils/start_vllm_server.sh" "$REPO_ROOT/$local_dir"
     echo "[benchmark] Eval baseline $run_name ($(date -u))"
-    "$PYTHON" "$REPO_ROOT/src/eval/eval_fullft.py" \
-        --checkpoint "$REPO_ROOT/$local_dir" \
+    "$PYTHON" "$REPO_ROOT/src/eval/eval_vllm.py" \
+        --model "$REPO_ROOT/$local_dir" \
         --run-name "$run_name" \
         --system-prompt "$system_prompt"
+    kill "$(cat /tmp/vllm_server.pid)" 2>/dev/null || true
+    sleep 3
 
     echo "[benchmark] Eval $run_name terminée ($(date -u))"
 

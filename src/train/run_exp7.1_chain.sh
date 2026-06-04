@@ -14,9 +14,13 @@ echo "========================================"
 # ── Étape 1 : Eval checkpoint-564 ────────────────────────────────────────────
 echo ""
 echo "[chain] STEP 1/3 — Eval exp7 checkpoint-564 ($(date -u))"
-"$PYTHON" "$REPO_ROOT/src/eval/eval_fullft.py" \
-    --checkpoint "$REPO_ROOT/saves/trl_grpo/exp7_b200_fullft/checkpoint-564" \
+CKPT="$REPO_ROOT/saves/trl_grpo/exp7_b200_fullft/checkpoint-564"
+bash "$REPO_ROOT/src/utils/start_vllm_server.sh" "$CKPT"
+"$PYTHON" "$REPO_ROOT/src/eval/eval_vllm.py" \
+    --model "$CKPT" \
     --run-name exp7_b200_fullft
+kill "$(cat /tmp/vllm_server.pid)" 2>/dev/null || true
+sleep 3   # libère le GPU avant le training (étapes 2-3)
 echo "[chain] STEP 1/3 — Eval terminée ($(date -u))"
 
 # ── Étape 2 : Smoke test rollout HTTP parallèle ───────────────────────────────

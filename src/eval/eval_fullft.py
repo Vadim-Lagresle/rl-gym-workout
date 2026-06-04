@@ -1,8 +1,12 @@
 """
+⚠️  FALLBACK UNIQUEMENT — préférer src/eval/eval_vllm.py (×2.9 plus rapide, KV cache).
+vLLM est désormais opérationnel sur ce serveur (0.9.1 manylinux1 + 2 patches, malgré
+glibc 2.28). Ne garder ce script que comme repli si vLLM casse. Voir CLAUDE.md.
+
 Évalue un checkpoint full fine-tuning produit par src/train/train_grpo.py sur TextCraft.
 
-Charge le checkpoint avec transformers (AutoModelForCausalLM) — pas vLLM, car
-vLLM nécessite glibc >= 2.31 et le serveur Criteo B200 a glibc 2.28.
+Charge le checkpoint avec transformers (AutoModelForCausalLM) — pas vLLM. Plus lent
+(pas de KV cache entre les rounds), à n'utiliser que si eval_vllm.py est indisponible.
 
 Joue 100 épisodes multi-tours, enregistre les logs dans runs/<run-name>/eval_logs/,
 calcule Pass@1 à la fin. Compatible eval_baseline.py (même format de logs).
