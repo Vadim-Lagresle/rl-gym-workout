@@ -2023,3 +2023,50 @@ Speedup attendu en training : 30 rounds × 8 épisodes en batch vLLM → ~15s g�
 (vs ~120s actuellement) → step_time ~40s (vs ~150s) → **×3.7 speedup**.
 
 **Fichiers :** `src/eval/eval_vllm.py`, `src/utils/start_vllm_server.sh`
+
+### Audit verl vs train_grpo.py — 7 fixes pour répliquer GRPO pur (2026-06-11)
+
+**Contexte :** audit complet de train_grpo.py contre le pipeline verl du papier
+(core_algos / ray_trainer / dp_actor / schemas / vllm_rollout) + lecture du papier
+(arXiv 2509.08755). Cible de réplication : Table 6 p.18 = **GRPO vanilla sur
+Qwen2.5-3B → 75/100 TextCraft** (recette appendice B.3 : 20 tours, LR 1e-6,
+KL 1e-3, temp 1.0, N=8 — uniforme 3B/7B).
+
+**Fixes appliqués (tous dans src/train/train_grpo.py) :**
+
+1. **Template multi-tour (bug principal)** — completion_ids contenait actions et
+   observations SANS les marqueurs de chat template (`<|im_start|>user`, `<|im_end|>`,
+   `\n<|im_start|>assistant\n`). Le backward recalculait donc les logprobs des actions
+   des tours ≥2 dans un contexte différent de celui de génération → ratio/KL corrompus.
+   Fix : marqueurs insérés dans le stream (env_mask=0 sur préfixes/obs, env_mask=1 sur
+   contenu assistant + son <|im_end|>), sémantique identique au RolloutHandler de verl
+   (schemas.py). Validé à sec : prompt_ids+completion_ids == rendu apply_chat_template
+   token pour token, contexte backward tour 2 == contexte génération tour 2.
+2. **`_VLLM_SYNC_EVERY` 5 → 1** — les rollouts des steps 1-4 post-sync étaient générés
+   par une policy périmée (off-policy non corrigé : la correction IS de TRL est
+   inactive car use_vllm=False). verl resync à chaque step.
+3. **`gradient_accumulation_steps` 8 → 64** — avant : 1 seul prompt × 8 gens par step
+   d'optimizer → step entier mort si std(groupe)=0 (fréquent en reward 0/1), variance
+   énorme sinon. Maintenant : 8 prompts × 8 gens = 64 trajectoires/step (papier : 256 ;
+   64 = compromis steps/heure sur B200 single-GPU, mémoire inchangée car micro-batch=1).
+4. **`MAX_SIM_ROUNDS` 30 → 20** — l'appendice B.3 dit 20 tours pour le run GRPO ; le 30
+   du textcraft_train.sh est le dernier palier ScalingInter. Figure 7 du papier : un
+   budget d'interaction trop grand dès le début déstabilise l'entraînement.
+5. **`num_iterations` 2 → 1** — découverte : le fork verl IGNORE ppo_inner_epochs=2
+   (update_policy fait une seule passe ; ppo_epochs n'apparaît que dans la métrique MFU).
+   Le run papier est effectivement 1 epoch. Avec grad_accum == steps_per_generation,
+   TRL devient on-policy pur (ratio ≡ 1, skip du forward old_logprobs).
+6. **`lr_scheduler_type="constant"`** — verl : warmup_style constant ; défaut HF :
+   linear decay vers 0 → LR moyen réel divisé par ~2 sur un run.
+7. **Action env : message assistant complet** — on envoyait `"Action: {1ère action}"`
+   pré-parsée ; verl envoie le texte décodé brut et le CLIENT AgentGym parse
+   (textcraft.py:85-96), y compris l'erreur pédagogique "Only one 'Action' is allowed"
+   sur les multi-actions, que notre pré-parsing court-circuitait.
+   (`extract_actions`/`first_action_or_empty` supprimées, mortes.)
+
+**Restes non corrigés (assumés) :** pas de bonus d'entropie (verl: 0.001, TRL GRPO n'en
+a pas) ; max_model_len 16384 vs 32768 ; Adam 8-bit vs fp32 ; batch 64 vs 256.
+
+**Attention :** coût par step ×8 (64 épisodes/step) → comparer les runs en épisodes
+totaux, pas en steps. Smoke test --max-steps 1 ≈ 64 épisodes. Anciens runs non
+comparables step-à-step (batch/rounds/loss différents).
