@@ -1,0 +1,49 @@
+name: exp16_single_turn_reasoning
+date: 2026-06-23
+description: >
+  Test de capacité de raisonnement single-turn sur TextCraft.
+  Phase 1 : pour chaque item du test set, extraire recettes + goal,
+  demander à Qwen le plan de craft complet en texte libre (sans syntaxe
+  TextCraft). Phase 2 (à coder) : convertir les plans en actions JSON
+  multi-tour et mesurer pass@1.
+
+algorithm: none (collect + eval oracle)
+model: Qwen2.5-3B-Instruct
+scripts:
+  phase1: src/eval/collect_single_turn_plans.py
+  phase2: TBD  # conversion plan → actions TextCraft + eval pass@1
+
+prerequisites:
+  - Serveur TextCraft sur 127.0.0.1:36005
+  - Serveur vLLM sur 127.0.0.1:8001
+
+phase1_command: >
+  bash src/utils/start_vllm_server.sh models/Qwen2.5-3B-Instruct
+
+  python src/eval/collect_single_turn_plans.py
+    --model models/Qwen2.5-3B-Instruct
+    --run-name exp16_single_turn_reasoning
+
+phase1_params:
+  max_tokens: 1024
+  temperature: 0.7
+  dataset: data/eval/textcraft_test.json  # 100 items
+  output: runs/exp16_single_turn_reasoning/plans/
+
+prompt_design: >
+  Pas de format Thought/Action. Le modèle reçoit recettes + goal et produit
+  un plan numéroté en anglais courant (gather X, combine Y, etc.).
+  Objectif : isoler le raisonnement de la contrainte de nomenclature TextCraft.
+
+result:
+  plans_collected: "100/100"
+  mean_plan_length_chars: 2128
+  mean_duration_s: 2.3
+  wall_time_s: 234
+  output: runs/exp16_single_turn_reasoning/plans/
+  pass_at_1_oracle: TBD  # phase 2
+
+notes: >
+  Compare avec baseline multi-tour pass@1=18/100 : si le plan single-turn est
+  correct mais l'exécution multi-tour échoue, le goulot est le contrôle /
+  format. Si le plan lui-même est faux, le goulot est le raisonnement de base.
