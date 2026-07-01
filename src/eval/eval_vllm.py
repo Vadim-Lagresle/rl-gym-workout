@@ -34,6 +34,7 @@ from agentenv.envs import TextCraftEnvClient
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
+DEPTH_MAP_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test_with_depth.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 VLLM_SERVER_URL = "http://127.0.0.1:8001"
 MAX_ROUNDS = 30
@@ -110,7 +111,8 @@ def build_initial_messages(client: TextCraftEnvClient,
 def run_episode(model_name: str, client: TextCraftEnvClient, item_id: str,
                 system_prompt: str = DEFAULT_SYSTEM_PROMPT,
                 max_rounds: int = MAX_ROUNDS,
-                vllm_url: str = VLLM_SERVER_URL) -> EpisodeResult:
+                vllm_url: str = VLLM_SERVER_URL,
+                temperature: float = 1.0) -> EpisodeResult:
     item_idx = item_id_to_idx(item_id)
     client.reset(item_idx)
     messages = build_initial_messages(client, system_prompt=system_prompt)
@@ -123,7 +125,8 @@ def run_episode(model_name: str, client: TextCraftEnvClient, item_id: str,
         rounds = round_idx + 1
         # vLLM reuses KV cache for the shared prefix between consecutive rounds.
         # Each round only computes new tokens (observation + generation prompt).
-        assistant_text = generate_reply_vllm(model_name, messages, vllm_url=vllm_url)
+        assistant_text = generate_reply_vllm(model_name, messages, vllm_url=vllm_url,
+                                              temperature=temperature)
         messages.append({"role": "assistant", "content": assistant_text})
 
         step_out = client.step(assistant_text)
@@ -183,6 +186,130 @@ def load_existing_log(item_id: str, log_dir: Path) -> EpisodeResult | None:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Diagnostic pass@k par profondeur (depth)
+#
+# But : mesurer la capacité d'EXPLORATION du modèle aux profondeurs difficiles.
+#   pass@k(item) = 1 si AU MOINS un des k rollouts atteint reward > 0, sinon 0.
+#   « pass@k moyen par depth » = fraction des items de cette depth résolus au
+#   moins une fois sur k essais.
+#
+# C'est l'indicateur qui dit si le RL a une graine à amplifier : si aucune
+# trajectoire correcte n'est jamais échantillonnée (pass@k = 0), le RL n'a aucun
+# signal de récompense à exploiter (cf. Dr. GRPO, arXiv:2503.20783).
+#
+# Indépendant du pass@1 ci-dessus — activé uniquement par --passk K.
+# La diversité entre les k échantillons d'un même item vient de temperature > 0.
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PassKItemResult:
+    item_id: str
+    depth: int
+    rewards: list[float]      # k récompenses finales (une par échantillon réussi à tourner)
+    n_success: int            # nb d'échantillons avec reward > 0
+    passed: bool              # au moins un succès sur les k
+
+
+def load_depth_map(path: Path = DEPTH_MAP_PATH) -> dict[str, int]:
+    """Charge le mapping {item_id: depth} du test set TextCraft."""
+    with path.open() as f:
+        return {item_id: int(depth) for item_id, depth in json.load(f).items()}
+
+
+def write_passk_log(result: EpisodeResult, sample_idx: int, depth: int,
+                    log_dir: Path) -> None:
+    fp = log_dir / f"{result.item_id}_d{depth}_s{sample_idx}.json"
+    payload = {
+        "item_id": result.item_id,
+        "item_idx": result.item_idx,
+        "depth": depth,
+        "sample_idx": sample_idx,
+        "reward": result.reward,
+        "done": result.done,
+        "rounds": result.rounds,
+        "duration_s": round(result.duration_s, 2),
+        "transcript": result.transcript,
+    }
+    with fp.open("w") as f:
+        json.dump(payload, f, indent=2)
+
+
+def run_pass_at_k_by_depth(
+    model_name: str,
+    items: list[dict],
+    depth_map: dict[str, int],
+    k: int = 8,
+    depths: tuple[int, ...] = (3, 4),
+    temperature: float = 1.0,
+    system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    vllm_url: str = VLLM_SERVER_URL,
+    log_dir: Path | None = None,
+) -> list[PassKItemResult]:
+    """Lance k rollouts par item (depths ciblées) et calcule pass@k par item.
+
+    Réutilise run_episode() tel quel ; seule la température (>0) garantit la
+    diversité entre les k échantillons d'un même item.
+    """
+    target = [it for it in items if depth_map.get(it["item_id"]) in depths]
+    if not target:
+        print(f"[passk] Aucun item aux depths {depths} dans le dataset.")
+        return []
+
+    print(f"[passk] {len(target)} items aux depths {depths}, k={k}, "
+          f"temperature={temperature} → {len(target) * k} rollouts.")
+
+    client = TextCraftEnvClient(env_server_base=ENV_SERVER_URL,
+                                data_len=len(target), timeout=60)
+
+    results: list[PassKItemResult] = []
+    for i, item in enumerate(target):
+        item_id = item["item_id"]
+        depth = depth_map[item_id]
+        rewards: list[float] = []
+        for j in range(k):
+            try:
+                r = run_episode(model_name, client, item_id,
+                                system_prompt=system_prompt,
+                                vllm_url=vllm_url, temperature=temperature)
+            except Exception as e:
+                print(f"[passk][{item_id} d{depth} s{j+1}/{k}] CRASHED: {e}")
+                continue
+            rewards.append(r.reward)
+            if log_dir is not None:
+                write_passk_log(r, j, depth, log_dir)
+        n_success = sum(1 for rw in rewards if rw > 0)
+        passed = n_success > 0
+        results.append(PassKItemResult(item_id, depth, rewards, n_success, passed))
+        print(f"[passk][{i+1}/{len(target)}] {item_id} d{depth} "
+              f"success={n_success}/{len(rewards)} pass@{k}={'Y' if passed else 'N'}")
+
+    return results
+
+
+def report_pass_at_k(results: list[PassKItemResult], k: int) -> None:
+    """Affiche pass@k moyen par depth (fraction d'items résolus ≥ 1 fois sur k)."""
+    if not results:
+        print("[passk] Aucun résultat.")
+        return
+    depths = sorted({r.depth for r in results})
+    print("\n" + "=" * 52)
+    print(f"PASS@{k} PAR DEPTH")
+    print(f"{'depth':>5} | {'items':>5} | {'pass@'+str(k):>8} | {'succ/sample':>11}")
+    print("-" * 52)
+    for d in depths:
+        rs = [r for r in results if r.depth == d]
+        n_items = len(rs)
+        n_passed = sum(1 for r in rs if r.passed)
+        total_samples = sum(len(r.rewards) for r in rs)
+        total_success = sum(r.n_success for r in rs)
+        passk = n_passed / n_items if n_items else 0.0
+        per_sample = total_success / total_samples if total_samples else 0.0
+        print(f"{d:>5} | {n_items:>5} | {passk:>8.2f} | {per_sample:>11.3f}")
+    print("=" * 52)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True,
@@ -194,6 +321,12 @@ def main() -> None:
     parser.add_argument("--system-prompt", type=str, default=DEFAULT_SYSTEM_PROMPT)
     parser.add_argument("--vllm-url", type=str, default=VLLM_SERVER_URL,
                         help="URL du serveur vLLM (défaut: http://localhost:8001)")
+    parser.add_argument("--passk", type=int, default=0,
+                        help="Si >0 : lance le diagnostic pass@K par depth (au lieu du pass@1).")
+    parser.add_argument("--passk-depths", type=str, default="3,4",
+                        help="Depths ciblées par le diagnostic pass@K (défaut: '3,4').")
+    parser.add_argument("--passk-temp", type=float, default=1.0,
+                        help="Température d'échantillonnage pour pass@K (>0 pour la diversité).")
     args = parser.parse_args()
 
     vllm_url = args.vllm_url
@@ -208,6 +341,27 @@ def main() -> None:
         raise SystemExit(f"Serveur vLLM non disponible sur {vllm_url}.\n"
                          f"Lance : bash src/utils/start_vllm_server.sh <checkpoint>\nErreur: {e}")
     print(f"[eval_vllm] Serveur vLLM OK sur {vllm_url}")
+
+    # --- Mode diagnostic pass@K par depth (n'exécute PAS le pass@1 standard) ---
+    if args.passk > 0:
+        depths = tuple(int(x) for x in args.passk_depths.split(","))
+        with DATASET_PATH.open() as f:
+            items = json.load(f)
+        if args.max_items > 0:
+            items = items[:args.max_items]
+        depth_map = load_depth_map()
+        passk_log_dir = REPO_ROOT / "runs" / args.run_name / "eval_logs_passk"
+        passk_log_dir.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+        results = run_pass_at_k_by_depth(
+            model_name, items, depth_map,
+            k=args.passk, depths=depths, temperature=args.passk_temp,
+            system_prompt=args.system_prompt, vllm_url=vllm_url,
+            log_dir=passk_log_dir,
+        )
+        report_pass_at_k(results, args.passk)
+        print(f"[passk] Wall time: {time.time() - t0:.1f}s  Logs: {passk_log_dir}/")
+        return
 
     log_dir = REPO_ROOT / "runs" / args.run_name / "eval_logs"
     log_dir.mkdir(parents=True, exist_ok=True)

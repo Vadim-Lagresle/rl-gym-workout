@@ -538,6 +538,136 @@ Pour chaque problème, parmi les 4 trajectoires :
 
 ---
 
+### Exp 8.2 — GRPO ScalingInter batch papier sur B200 (TRL + vLLM in-process)
+
+**Objectif** : aligner le batch GRPO sur la recette papier TextCraft
+(`train_batch_size=32`, `N=8` → 256 trajectoires/step) avec un budget
+ScalingInter réduit (20 epochs, ~220 steps) sur B200 192 Go.
+
+**Setup spécifique** :
+
+| Élément | Valeur |
+|---|---|
+| Fine-tuning | Full FT (`--full-ft`) |
+| `num_generations` (N) | 8 |
+| `gradient_accumulation_steps` | 256 (32 prompts × N=8) |
+| `max_rounds_schedule_epochs` | `6:0,12:4,18:8,24:12` |
+| `num_epochs` | 20 (~220 steps) |
+| Eval in-loop | tous les 11 steps (1×/epoch) |
+| Checkpoint | `_best` uniquement (`save_steps=100000`) |
+| Run name | `exp8.2_paper_batch_b200` |
+
+**Résultats training** :
+
+| Métrique | Valeur |
+|---:|---:|
+| Steps complétés | 220 / 220 |
+| Wall time | ~18 h 24 |
+| Pass@1 best (in-loop eval) | **20 / 100** @ step 187 |
+| Pass@1 final (step 220) | 16 / 100 |
+| Checkpoint conservé | `saves/trl_grpo/exp8.2_paper_batch_b200_best/` |
+
+**Résultats eval in-loop (best @ step 187)** :
+
+| Depth | Pass@1 |
+|---|---:|
+| 1 | 61 % |
+| 2 | 0 % |
+| 3 | 0 % |
+| 4 | 0 % |
+
+**Verdict** : léger gain vs baseline TRL (+2 pts best vs 18/100), loin du
+papier 75/100. Depth 2 apparaît faiblement en fin de run (5 % @ step 220)
+mais pas au checkpoint best. Comparaison exp8.1 (64 traj/step, best in-loop
+25 % non sauvé faute de disque) : le batch papier n'apporte pas de saut net.
+
+---
+
+### Exp 16 — Raisonnement single-turn (plan oracle, sans entraînement)
+
+**Objectif** : isoler la capacité de **planification one-shot** du modèle base,
+indépendamment du contrôle multi-tour Thought/Action.
+
+**Protocole en deux phases** :
+
+| Phase | Script | Description |
+|---|---|---|
+| 1 | `collect_single_turn_plans.py` | recettes + goal → plan texte libre (100 items) |
+| 2 | `replay_single_turn_plans.py` | plan → extraction JSON actions → replay TextCraft |
+
+Phase 2 : 1 appel LLM/item pour convertir le plan en actions, puis exécution
+déterministe dans l'env (sans LLM entre les steps). Métrique = **pass@1 oracle**.
+
+#### Exp 16a — Qwen2.5-3B-Instruct (2026-06-24)
+
+| Métrique | Valeur |
+|---:|---:|
+| **Pass@1 global** | **20 / 100 (20 %)** |
+| Depth 1 | 13 / 31 (41.9 %) |
+| Depth 2 | 7 / 41 (17.1 %) |
+| Depth 3 | 0 / 25 (0 %) |
+| Depth 4 | 0 / 3 (0 %) |
+| Erreurs extraction JSON | 11 / 100 |
+| Wall time (collect + replay) | ~6 min |
+
+Artefacts : `runs/exp16_single_turn_reasoning/plans/`,
+`runs/exp16_single_turn_reasoning/replay_logs/`.
+
+#### Exp 16b — Qwen3.5-4B (2026-06-24)
+
+| Métrique | Valeur |
+|---:|---:|
+| **Pass@1 global** | **54 / 100 (54 %)** |
+| Depth 1 | 24 / 31 (77.4 %) |
+| Depth 2 | 22 / 41 (53.7 %) |
+| Depth 3 | 8 / 25 (32.0 %) |
+| Depth 4 | 0 / 3 (0 %) |
+| Erreurs extraction JSON | 2 / 100 |
+| Wall time replay | ~381 s |
+
+Backend HF `generate()` (`--backend hf --no-thinking`), vLLM non supporté pour
+Qwen3.5. Artefacts : `runs/exp16_qwen35_4b/plans/`,
+`runs/exp16_qwen35_4b/replay_logs/`.
+
+#### Comparaison oracle vs multi-tour (même modèle Qwen3.5-4B)
+
+| Protocole | Pass@1 | Depth 1 | Depth 2 | Depth 3 | Depth 4 |
+|---|---:|---:|---:|---:|---:|
+| **Exp 16b oracle single-turn** | **54 / 100** | 77 % | 54 % | 32 % | 0 % |
+| **Exp 15 multi-tour interactif** | **77 / 100** | 97 % | 81 % | 56 % | 0 % |
+| Δ oracle − multi-tour | **−23 pts** | −20 pts | −27 pts | −24 pts | = |
+
+**Paradoxe apparent** : l'oracle devrait être une *borne supérieure* — le modèle
+voit toutes les recettes, peut réfléchir sans contrainte de format, puis exécute
+sans erreur de parsing inter-tours. Pourtant **54/100 < 77/100**.
+
+**Interprétation** (pas un problème de mémoire de contexte) :
+
+1. **Feedback env absent en oracle** : le multi-tour (Exp 15, `mean_rounds=13.9`,
+   bien en dessous de la limite 30 tours) reçoit l'inventaire, les erreurs
+   (`get` impossible → essayer un craft), et peut corriger en cours de route.
+   L'oracle doit produire un plan *et* une séquence d'actions correcte *sans*
+   aucune observation intermédiaire.
+
+2. **Deux points de défaillance en oracle** : plan texte (phase 1) **puis**
+   extraction JSON (phase 2). Le multi-tour n'a qu'un format Thought/Action par
+   tour, avec validation immédiate à chaque step.
+
+3. **Le multi-tour est plus facile que le one-shot parfait** sur TextCraft, tant
+   que le contexte tient (≤30 tours, ~14 en moyenne). Ce n'est pas contradictoire
+   avec la littérature agentique : l'interaction compense les erreurs de
+   raisonnement transitif (cf. Pattern 2 Exp 6).
+
+4. **Écart modèle-dépendant** : Qwen2.5 oracle ≈ baseline multi-tour (20 vs 18).
+   Qwen3.5 oracle << multi-tour (54 vs 77) : le modèle plus fort *profite davantage*
+   du feedback iteratif que de la planification upfront.
+
+**Prochaine analyse** : classifier échecs plan vs extraction vs exécution dans
+`replay_logs/` (notamment les 46 items où Qwen3.5 multitour réussit mais oracle
+échoue).
+
+---
+
 ### Tableau récapitulatif
 
 | Run | Steps | Train time | Pass@1 | Δ vs base | Commentaire |
@@ -550,11 +680,19 @@ Pour chaque problème, parmi les 4 trajectoires :
 | v4+envreward (T3-A) | 50+50 | *abandonné* | — | — | dépendait de gain v4, voir Exp 5 |
 | v4+scporeward (T3-B) | 50+50 | *abandonné* | — | — | dépendait de gain v4, voir Exp 5 |
 | **Exp 6 verl 4× A100** | 50 | ~2 h 40 (somme `timing_s/step` sur 49 logs) + overhead | **38 / 100** | **+20** vs baseline 18 | checkpoint `global_step_50`, full FT, N=8, `rounds=30`, cf. §Exp 6 |
+| **Exp 8.2 ScalingInter batch papier (B200)** | 220 | ~18 h 24 | **20 / 100** (best @187) | **+2** vs baseline 18 | full FT, N=8, 256 traj/step, cf. §Exp 8.2 |
+| **Exp 16a single-turn oracle (Qwen2.5-3B)** | — | ~6 min | **20 / 100** | **+2** vs baseline 18 | plan one-shot + replay TextCraft, cf. §Exp 16 |
+| **Exp 16b single-turn oracle (Qwen3.5-4B)** | — | ~6 min | **54 / 100** | **+36** vs baseline 18 | oracle **−23 pts** vs Exp 15 multitour 77/100 |
+| **Exp 15 — Qwen3.5-4B baseline** | — | — | **77 / 100** | **+59** vs baseline 18 | sans entraînement, multitour interactif, non-thinking |
 
 **Reference du papier AgentGym-RL** (Table 2, Yang et al. 2026) :
 Qwen2.5-3B-Instruct + GRPO + full FT + N=8 + max_turns=30 constant → **Pass@1 = 75 / 100**.
 Notre meilleure expé (v4-ScalingInter-sparse) à 14/100, soit un écart
 de **−61 points** avec la recette du papier — voir §"Écart à la recette papier" ci-dessous.
+
+**Exp 15 — Qwen3.5-4B baseline (sans entraînement)** : **77 / 100** — dépasse l'objectif papier.
+Implication : un meilleur modèle de base suffit à franchir 75/100 sans RL.
+Depth 4 reste un mur universel (0/3). Voir §Exp 15 pour le détail.
 
 ---
 
@@ -640,6 +778,60 @@ et idéalement la recette papier complète.
 
 ---
 
+### Exp 15 — Baseline Qwen3.5-4B sur TextCraft (sans entraînement)
+
+**Objectif** : mesurer si un modèle de base plus récent et plus grand relève le plancher,
+avant toute décision sur le RL. Hypothèse : si 77/100 est atteignable sans training,
+le signal GRPO à exploiter est très différent du cas Qwen2.5-3B (18/100 baseline).
+
+**Setup** :
+
+| Élément | Valeur |
+|---|---|
+| Modèle | Qwen/Qwen3.5-4B (hub HF) |
+| Architecture | `Qwen3_5ForConditionalGeneration` (hybride Gated DeltaNet + attention) |
+| Post-training | SFT + RL Qwen (thinking + agentic), thinking désactivé (`--no-thinking`) |
+| Stack eval | HF `generate()` via `eval_fullft.py` (vLLM incompatible : archi trop récente) |
+| GPU | B200 192 Go |
+| `max_rounds` | 30 |
+| `max_new_tokens` | 512 |
+| Temperature | 1.0 |
+| `HF_HOME` | `/tmp/hf_cache` (overlay 221 Go) |
+
+**Résultats** :
+
+| Depth | Items | Pass@1 | Taux |
+|---|---|---|---|
+| 1 | 31 | 30 | 96.8 % |
+| 2 | 41 | 33 | 80.5 % |
+| 3 | 25 | 14 | 56.0 % |
+| 4 | 3 | 0 | 0.0 % |
+| **Total** | **100** | **77** | **77.0 %** |
+
+Wall time : 9560 s (~2h39). Mean rounds : 13.9. Erreur dominante : `format_error` (51 % recovery).
+
+**Comparaison avec Exp 6 (Qwen2.5-3B après 50 steps RL verl)** :
+
+| | Qwen2.5-3B + 50 steps GRPO | Qwen3.5-4B baseline |
+|---|---:|---:|
+| Depth 1 | 27/31 (87 %) | 30/31 (97 %) |
+| Depth 2 | 10/41 (24 %) | 33/41 (80 %) |
+| Depth 3 | 1/25 (4 %) | 14/25 (56 %) |
+| Depth 4 | 0/3 | 0/3 |
+| **Total** | **38/100** | **77/100** |
+
+**Conclusion** : Qwen3.5-4B sans training dépasse non seulement Exp 6 mais aussi
+l'objectif du papier (75/100). Depth 4 reste un mur universel (0/3) même pour ce modèle.
+Le RL sur Qwen3.5-4B aurait une baseline de départ bien plus haute que sur Qwen2.5-3B,
+mais la question se déplace : quelle marge de progression reste-t-il à exploiter par GRPO ?
+
+**Note Exp 16b** : le même modèle en protocole oracle single-turn n'atteint que
+**54/100** (−23 pts vs ce multi-tour). Voir §Exp 16 — le feedback env rend le
+multi-tour *plus facile* que la planification one-shot parfaite, sans artefact
+de limite de contexte (`mean_rounds=13.9`).
+
+---
+
 ### Audit verl + smoke tests (préalable à la migration 8× A100)
 
 **Contexte** : avant de provisionner une VM 8× A100 40 Go pour répliquer la
@@ -704,4 +896,31 @@ jours sans garantie.
 Décision : on **provisionne 8× A100 40 Go** et on lance directement la
 recette `textcraft_train.sh` avec les overrides 40 Go (`gpu_memory_utilization=0.65`,
 `max_response_length=8192`, sinon paramètres papier inchangés).
+
+---
+
+### Oracle pass@k — marge exploitable par le RL (2026-06-16)
+
+Protocole : N=20 trajectoires/item (T=1.0, ≤30 tours), pass@k non biaisé (Chen et al. 2021),
+global + par depth. pass@1 = fiable ; pass@20 = atteignable « avec oracle » (borne sup.
+optimiste). Script `src/eval/eval_oracle.py`. **Analyse détaillée : `runs/oracle_best32/ANALYSIS.md`.**
+
+**pass@k par depth — baseline Qwen2.5-3B vs best GRPO (checkpoint 32/100) :**
+| depth | items | base @1→@20 | best @1→@20 |
+|---|---|---|---|
+| 1 | 31 | 27 → 94 | 79 → 100 |
+| 2 | 41 | 4 → 44 | 18 → **78** |
+| 3 | 25 | 0 → **0** | 1 → **8** |
+| 4 | 3 | 0 → **0** | 0 → **0** |
+| global | 100 | 10 → 47 | 32 → **65** |
+
+**Conclusions :**
+- **Depth 2 = mur de fiabilité, exploitable par RL** : le best sait résoudre 78% des items
+  depth-2 « parfois » mais 18% de façon fiable (marge **+60 pts**). Priorité pour pousser le score.
+- **Depth 3-4 = mur de capacité** : best plafonne à 8% (depth 3 : 4 succès/500 tirages, 2 items)
+  et **0%** (depth 4 : 0/60). Baseline = **0 partout** à depth 3-4 (0/500, 0/60).
+  → pass@k=0 ⇒ aucune graine pour GRPO (Dr. GRPO) ⇒ le RL pur **ne peut pas** bootstrap ces
+  profondeurs. Il faut injecter des succès : **curriculum / SFT / CoT**.
+- **Nuance** : le RL a quand même *déplacé la frontière* (depth-2 : +14 items atteignables ;
+  depth-3 : +2 items, jamais résolus par la baseline) → depth 3 est à la limite, pas un mur infini.
 

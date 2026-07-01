@@ -45,5 +45,18 @@ hypotheses:
     Si exp8 ≈ exp7, alors ScalingInter n'apporte rien de plus que les hyperparamètres
     propres — le gain du papier viendrait uniquement de full FT + N=8.
 
-results: ~
-verdict: ~
+results:
+  status: INCOMPLET — run mort au step 214/300 (~2.3 epochs), probable OOM sur
+          les longs rollouts a max_rounds=30 (pas de traceback, GPU libere).
+  checkpoints_survivants: checkpoint-200 uniquement (save_total_limit=1, pas de suivi du best)
+  eval_checkpoint-200_pass@1: 19/100 (19.0%)   # test set, 100 items, 2026-06-22
+  eval_par_depth:
+    depth1: 15/31 (48%)
+    depth2: 4/41 (10%)
+    depth3: 0/25 (0%)
+    depth4: 0/3 (0%)
+verdict: >
+  ScalingInter (10->20->30, step-based) n'apporte rien de mesurable sur le 3B a ce
+  stade : 19/100 ~ baseline (18), et le mur depth>=3 tient (0/28). Confirme plutot H2.
+  Limites : run incomplet (214/300) et pas forcement le meilleur step (aucun suivi pass@1).
+  Suite -> exp8.1 (curriculum epoch-based 6..25 plus fin, 10 epochs, suivi du best).

@@ -36,15 +36,15 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-import requests
 from agentenv.envs import TextCraftEnvClient
+
+from llm_chat import ChatGenerator, VLLM_SERVER_URL
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 DEPTH_MAP_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test_with_depth.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
-VLLM_SERVER_URL = "http://127.0.0.1:8001"
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are Qwen, created by Alibaba Cloud. You are a helpful assistant "
@@ -106,37 +106,6 @@ def load_depth_map(path: Path = DEPTH_MAP_PATH) -> dict[str, int]:
         return {item_id: int(depth) for item_id, depth in json.load(f).items()}
 
 
-def check_vllm_server(vllm_url: str) -> None:
-    try:
-        requests.get(f"{vllm_url}/health", timeout=5).raise_for_status()
-    except Exception as e:
-        raise SystemExit(
-            f"Serveur vLLM non disponible sur {vllm_url}.\n"
-            f"Lance-le avec : bash src/utils/start_vllm_server.sh <model>\n"
-            f"Erreur : {e}"
-        )
-
-
-def generate_reply_vllm(
-    model_name: str,
-    messages: list[dict],
-    vllm_url: str = VLLM_SERVER_URL,
-    max_tokens: int = 1024,
-    temperature: float = 0.7,
-) -> str:
-    payload = {
-        "model": model_name,
-        "messages": messages,
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-        "top_p": 1.0,
-        "stream": False,
-    }
-    r = requests.post(f"{vllm_url}/v1/chat/completions", json=payload, timeout=180)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
-
-
 def build_planning_messages(
     recipes: str,
     goal: str,
@@ -150,12 +119,11 @@ def build_planning_messages(
 
 
 def collect_plan(
-    model_name: str,
+    llm: ChatGenerator,
     client: TextCraftEnvClient,
     item_id: str,
     depth: int | None,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-    vllm_url: str = VLLM_SERVER_URL,
     max_tokens: int = 1024,
     temperature: float = 0.7,
 ) -> PlanResult:
@@ -166,10 +134,8 @@ def collect_plan(
     messages = build_planning_messages(recipes, goal, system_prompt=system_prompt)
 
     t0 = time.time()
-    plan = generate_reply_vllm(
-        model_name,
+    plan = llm.generate(
         messages,
-        vllm_url=vllm_url,
         max_tokens=max_tokens,
         temperature=temperature,
     )
@@ -238,25 +204,28 @@ def main() -> None:
         description="Collecte des plans single-turn TextCraft (phase 1 exp16)."
     )
     parser.add_argument("--model", required=True,
-                        help="Chemin ou nom du modèle chargé dans le serveur vLLM")
+                        help="Chemin local ou id HF Hub du modèle")
     parser.add_argument("--run-name", default="exp16_single_turn_reasoning",
                         help="Nom du run (plans dans runs/<run-name>/plans/)")
     parser.add_argument("--max-items", type=int, default=0, help="0 = tous les 100 items")
     parser.add_argument("--force-redo", action="store_true")
     parser.add_argument("--system-prompt", type=str, default=DEFAULT_SYSTEM_PROMPT)
+    parser.add_argument("--backend", choices=("auto", "vllm", "hf"), default="auto")
     parser.add_argument("--vllm-url", type=str, default=VLLM_SERVER_URL)
+    parser.add_argument("--no-thinking", action="store_true",
+                        help="Qwen3/3.5 : enable_thinking=False")
     parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--temperature", type=float, default=0.7)
     args = parser.parse_args()
 
-    vllm_url = args.vllm_url
-    model_path = Path(args.model)
-    if not model_path.is_absolute():
-        model_path = REPO_ROOT / model_path
-    model_name = str(model_path)
-
-    check_vllm_server(vllm_url)
-    print(f"[collect_plans] Serveur vLLM OK sur {vllm_url}")
+    model_ref = args.model
+    llm = ChatGenerator(
+        model_ref,
+        backend=args.backend,
+        vllm_url=args.vllm_url,
+        no_thinking=args.no_thinking,
+    )
+    model_name = llm.model_ref
 
     log_dir = REPO_ROOT / "runs" / args.run_name / "plans"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -287,12 +256,11 @@ def main() -> None:
         depth = depth_map.get(item_id)
         try:
             r = collect_plan(
-                model_name,
+                llm,
                 client,
                 item_id,
                 depth=depth,
                 system_prompt=args.system_prompt,
-                vllm_url=vllm_url,
                 max_tokens=args.max_tokens,
                 temperature=args.temperature,
             )

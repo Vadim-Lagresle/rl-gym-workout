@@ -1,0 +1,58 @@
+name: scalinginter_epochs_b200
+date: 2026-06-22
+description: >
+  Reprise d'exp8 (ScalingInter) avec un curriculum d'interaction plus fin et
+  piloté par EPOCH (et non plus par step). max_rounds monte 6 → 11 → 16 → 21 → 25,
+  un palier toutes les 2 epochs. Run de 10 epochs au total (5 paliers × 2 epochs).
+  Suivi + sauvegarde du MEILLEUR checkpoint par pass@1 activé (corrige le manque
+  d'exp8, qui n'avait gardé que checkpoint-200 sans suivi du best).
+
+algorithm: GRPO (TRL) + vLLM in-process + ScalingInter curriculum (epoch-based)
+model: Qwen2.5-3B-Instruct
+script: src/train/train_grpo.py
+hardware: 1x B200 192 GB HBM3e (Criteo Coder)
+
+training:
+  fine_tuning: Full FT (--full-ft)
+  num_generations: 16          # 4 prompts x 16 gen = 64 trajectoires / step
+  max_completion_length: 512
+  num_epochs: 10               # 5 paliers x 2 epochs ; ~93.5 steps/epoch -> ~935 steps
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 64
+  learning_rate: 1e-6
+  max_rounds_schedule_epochs: "6:0,11:2,16:4,21:6,25:8"   # <rounds>:<epoch>
+  eval_every: 187              # ~ toutes les 2 epochs -> eval test set + save best
+  eval_items: 100
+  save_steps: 100000           # checkpoints periodiques desactives (disque) ; on garde le _best
+  dataset: data/train/textcraft_train.json
+
+command: >
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  python src/train/train_grpo.py
+    --full-ft
+    --num-generations 16
+    --max-completion-length 512
+    --max-items 0
+    --num-epochs 10
+    --use-vllm-inprocess
+    --max-rounds-schedule-epochs "6:0,11:2,16:4,21:6,25:8"
+    --eval-every 187
+    --eval-items 100
+    --save-steps 100000
+    --run-name exp8.1_scalinginter_b200
+
+eval_command: >
+  bash src/utils/start_vllm_server.sh saves/trl_grpo/exp8.1_scalinginter_b200_best
+  && python src/eval/eval_vllm.py
+       --model saves/trl_grpo/exp8.1_scalinginter_b200_best
+       --run-name exp8.1_scalinginter_b200_best
+
+hypotheses:
+  H1: >
+    Un curriculum d'interaction plus progressif (5 paliers fins 6->25 sur 10 epochs)
+    et un entrainement plus long laissent le temps au modele de stabiliser les
+    taches courtes avant d'attaquer les longues -> gain attendu surtout sur depth 2-3
+    vs exp8 (qui plafonnait a 19/100, 0 sur depth>=3, run incomplet 214/300).
+
+results: ~
+verdict: ~

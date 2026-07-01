@@ -11,7 +11,16 @@ algorithm: none (collect + eval oracle)
 model: Qwen2.5-3B-Instruct
 scripts:
   phase1: src/eval/collect_single_turn_plans.py
-  phase2: TBD  # conversion plan → actions TextCraft + eval pass@1
+  phase2: src/eval/replay_single_turn_plans.py
+
+phase2_command: >
+  bash src/utils/start_vllm_server.sh models/Qwen2.5-3B-Instruct
+
+  python src/eval/replay_single_turn_plans.py
+    --model models/Qwen2.5-3B-Instruct
+    --run-name exp16_single_turn_reasoning
+
+phase2_output: runs/exp16_single_turn_reasoning/replay_logs/
 
 prerequisites:
   - Serveur TextCraft sur 127.0.0.1:36005
@@ -41,7 +50,15 @@ result:
   mean_duration_s: 2.3
   wall_time_s: 234
   output: runs/exp16_single_turn_reasoning/plans/
-  pass_at_1_oracle: TBD  # phase 2
+  pass_at_1_oracle: "20/100 (20%)"
+  pass_at_1_oracle_by_depth:
+    d1: "13/31 (41.9%)"
+    d2: "7/41 (17.1%)"
+    d3: "0/25 (0%)"
+    d4: "0/3 (0%)"
+  extraction_errors: "11/100"
+  phase2_output: runs/exp16_single_turn_reasoning/replay_logs/
+  phase2_wall_time_s: 134
 
 notes: >
   Compare avec baseline multi-tour pass@1=18/100 : si le plan single-turn est

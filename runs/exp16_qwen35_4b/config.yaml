@@ -1,0 +1,40 @@
+name: exp16_qwen35_4b_single_turn
+date: 2026-06-24
+description: >
+  Même protocole qu'exp16 (plan single-turn + extraction JSON + replay TextCraft)
+  mais avec Qwen3.5-4B base (HF generate, vLLM non supporté).
+
+model: Qwen/Qwen3.5-4B
+scripts:
+  phase1: src/eval/collect_single_turn_plans.py
+  phase2: src/eval/replay_single_turn_plans.py
+
+backend: huggingface generate (--backend hf --no-thinking)
+
+phase1_command: >
+  python src/eval/collect_single_turn_plans.py
+    --model models/Qwen3.5-4B
+    --backend hf
+    --no-thinking
+    --run-name exp16_qwen35_4b
+
+phase2_command: >
+  python src/eval/replay_single_turn_plans.py
+    --model models/Qwen3.5-4B
+    --backend hf
+    --no-thinking
+    --run-name exp16_qwen35_4b
+
+compare_with:
+  exp16_qwen25_3b_oracle: 20/100
+  exp15_qwen35_multiturn_baseline: 77/100
+
+result:
+  pass_at_1_oracle: 54/100
+  by_depth:
+    d1: 24/31
+    d2: 22/41
+    d3: 8/25
+    d4: 0/3
+  extraction_errors: 2/100
+  delta_vs_exp15_multitour: -23

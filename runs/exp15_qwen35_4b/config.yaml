@@ -1,0 +1,50 @@
+# exp15 — Éval baseline Qwen3.5-4B sur TextCraft (test set, SANS entraînement)
+#
+# But : mesurer la baseline d'un modèle récent (Qwen3.5, fév. 2026) sur les 100 items
+#       de test, pour voir si un meilleur modèle de base relève le plancher (GRPO ne
+#       peut rien apprendre si la baseline est ~0, cf. exp10 Qwen0.5B = 0/100).
+
+modele:
+  hub_id: Qwen/Qwen3.5-4B
+  params: ~4B (3.6B non-embedding)
+  type: instruct (post-trained SFT + RL), multimodal, thinking par défaut
+  archi: Qwen3_5ForConditionalGeneration  (model_type=qwen3_5)
+  contexte: 262144 tokens natif
+
+stack_eval:
+  # vLLM 0.9.1 NE SUPPORTE PAS l'archi qwen3_5 (trop récente) → fallback HF generate.
+  # Vérifié via : python src/utils/vllm_supports.py Qwen/Qwen3.5-4B  -> "no"
+  moteur: huggingface generate() (eval_fullft.py)
+  mode: non-thinking (--no-thinking, enable_thinking=False)   # sinon <think>...</think> casse le parser TextCraft
+  classe_chargement: AutoModelForCausalLM -> Qwen3_5ForCausalLM (variante texte-seul)
+  dtype: bfloat16
+  max_rounds: 30
+  max_new_tokens: 512
+  temperature: 1.0   # cohérent avec le harness d'éval existant (à noter : Qwen3 recommande 0.7)
+  system_prompt: "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
+
+infra:
+  gpu: B200 192 Go
+  hf_cache: /tmp/hf_cache   # overlay 221 Go — /home/criteo (35 Go) est saturé
+  textcraft_server: http://127.0.0.1:36005
+
+commande: |
+  export HF_HOME=/tmp/hf_cache
+  bash src/eval/run_eval_auto.sh Qwen/Qwen3.5-4B exp15_qwen35_4b --no-thinking
+  # puis analyse :
+  python src/analysis/analyze_eval.py --eval-dir runs/exp15_qwen35_4b/eval_logs
+
+resultats:
+  pass_1: 77/100 (77.0%)
+  wall_time: 9560s (~2h39)
+  mean_rounds: 13.9
+  par_depth:
+    depth_1: 30/31  (96.8%)
+    depth_2: 33/41  (80.5%)
+    depth_3: 14/25  (56.0%)
+    depth_4: 0/3    (0.0%)
+  note: >
+    Baseline Qwen3.5-4B sans entraînement dépasse l'objectif papier (75/100).
+    Depth 4 reste un mur universel (0/3, comme Qwen2.5-3B entraîné verl).
+    Profil d'erreur dominé par format_error (51% recovery) et generic_fail (52%).
+    Implication : un meilleur modèle de base suffit à franchir 75/100 sans RL.

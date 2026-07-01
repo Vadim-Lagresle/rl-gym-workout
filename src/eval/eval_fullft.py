@@ -86,10 +86,21 @@ def build_initial_messages(client: TextCraftEnvClient, system_prompt: str = DEFA
         ]
 
 
-def generate_reply(model, tokenizer, messages: list[dict], max_new_tokens: int = 512) -> str:
-    prompt = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
+def generate_reply(model, tokenizer, messages: list[dict], max_new_tokens: int = 512,
+                   enable_thinking: bool = True) -> str:
+    # Qwen3/Qwen3.5 démarrent en "thinking mode" et émettent <think>...</think> :
+    # illisible pour le parser TextCraft et ça consomme tout le budget de tokens.
+    # enable_thinking=False force des actions directes. Guard: les vieux templates
+    # ignorent le kwarg (TypeError) → on retombe sur l'appel sans le kwarg.
+    try:
+        prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+            enable_thinking=enable_thinking,
+        )
+    except TypeError:
+        prompt = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True,
+        )
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
     with torch.no_grad():
         output_ids = model.generate(
@@ -111,6 +122,7 @@ def run_episode(
     item_id: str,
     max_rounds: int = MAX_ROUNDS,
     system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+    enable_thinking: bool = True,
 ) -> EpisodeResult:
     item_idx = item_id_to_idx(item_id)
     client.reset(item_idx)
@@ -122,7 +134,7 @@ def run_episode(
 
     for round_idx in range(max_rounds):
         rounds = round_idx + 1
-        assistant_text = generate_reply(model, tokenizer, messages)
+        assistant_text = generate_reply(model, tokenizer, messages, enable_thinking=enable_thinking)
         messages.append({"role": "assistant", "content": assistant_text})
 
         step_out = client.step(assistant_text)
@@ -190,13 +202,19 @@ def main() -> None:
     parser.add_argument("--force-redo", action="store_true", help="Ignore cached logs")
     parser.add_argument("--system-prompt", type=str, default=DEFAULT_SYSTEM_PROMPT,
                         help="System prompt. Pass '' for models without system role (e.g. Gemma-3).")
+    parser.add_argument("--no-thinking", action="store_true",
+                        help="Force non-thinking mode (Qwen3/3.5): enable_thinking=False dans le chat template.")
     args = parser.parse_args()
 
-    checkpoint_path = Path(args.checkpoint)
-    if not checkpoint_path.is_absolute():
-        checkpoint_path = REPO_ROOT / checkpoint_path
-    if not checkpoint_path.exists():
-        raise SystemExit(f"Checkpoint not found: {checkpoint_path}")
+    # --checkpoint accepte un chemin local OU un id HF Hub (ex: Qwen/Qwen3.5-4B).
+    local_path = Path(args.checkpoint)
+    if not local_path.is_absolute():
+        local_path = REPO_ROOT / args.checkpoint
+    if local_path.exists():
+        model_ref = str(local_path)
+    else:
+        model_ref = args.checkpoint  # traité comme id HF Hub
+        print(f"[eval] '{args.checkpoint}' introuvable en local → traité comme un id HF Hub.")
 
     log_dir = REPO_ROOT / "runs" / args.run_name / "eval_logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -218,12 +236,13 @@ def main() -> None:
 
     new_results: list[EpisodeResult] = []
     if todo:
-        print(f"[eval] Loading model from {checkpoint_path} ...")
-        tokenizer = AutoTokenizer.from_pretrained(str(checkpoint_path))
+        print(f"[eval] Loading model from {model_ref} ...")
+        tokenizer = AutoTokenizer.from_pretrained(model_ref, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
-            str(checkpoint_path),
+            model_ref,
             torch_dtype=torch.bfloat16,
             device_map="auto",
+            trust_remote_code=True,
         )
         model.eval()
         print("[eval] Model loaded.")
@@ -237,7 +256,8 @@ def main() -> None:
         for i, item in enumerate(todo):
             item_id = item["item_id"]
             try:
-                r = run_episode(model, tokenizer, client, item_id, system_prompt=args.system_prompt)
+                r = run_episode(model, tokenizer, client, item_id, system_prompt=args.system_prompt,
+                                enable_thinking=not args.no_thinking)
             except Exception as e:
                 print(f"[eval][{i+1}/{len(todo)}] {item_id} CRASHED: {e}")
                 continue

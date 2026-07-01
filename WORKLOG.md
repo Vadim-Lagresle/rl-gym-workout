@@ -2070,3 +2070,52 @@ a pas) ; max_model_len 16384 vs 32768 ; Adam 8-bit vs fp32 ; batch 64 vs 256.
 **Attention :** coût par step ×8 (64 épisodes/step) → comparer les runs en épisodes
 totaux, pas en steps. Smoke test --max-steps 1 ≈ 64 épisodes. Anciens runs non
 comparables step-à-step (batch/rounds/loss différents).
+
+
+## 2026-06-16 — Métriques eval fines + outillage d'analyse
+
+Détail complet : `docs/hebdo/19juin/session_2026-06-16.md`. Points durables :
+
+1. **Métriques eval par step (wandb)** — `run_test_eval` loggue maintenant, en plus du
+   pass@1 : `eval/pass1_d{1..4}`, `eval/rounds_mean_d{1..4}` + `eval/rounds_std_d{1..4}`,
+   `eval/errors_d{1..4}`, `eval/err_<type>_per_ep`. Taxonomie d'erreurs importée d'
+   `analyze_eval` (source UNIQUE — pas de duplication). Purement additif à l'éval
+   périodique (hors hot-path train). Validé à sec (compile + agrégation) ; **smoke test
+   GPU à faire avant le prochain run réel**. Actif au prochain run (we5 inchangé).
+
+2. **TODO `train/reward_d{1..4}`** — logger le reward d'entraînement par depth est
+   faisable (via `rollout_func` + `data/train/textcraft_train_with_depth.json`), mais
+   touche le hot-path et est bruité par step (8 prompts/step). **Smoke test obligatoire
+   avant activation.** Non fait pour l'instant (choix : démarrer par les métriques eval).
+
+3. **Correction d'analyse — écart verl** : la sous-performance TRL (~24 plateau) vs verl
+   exp6 (38) n'est **PAS** due à `num_iterations` (déjà aligné, cf. audit 11/06 point 5 :
+   le fork verl ignore `ppo_epochs=2`) ni au KL (`beta=0.001` aligné). Candidat réel
+   restant : **cap de tours training 20 vs 30** (exp6/textcraft_train.sh à 30 ; notre 20
+   vient de l'appendice B.3). + écarts assumés (pas de bonus d'entropie, batch 64 vs 256,
+   Adam 8-bit). Cause **ouverte** — à objectiver d'abord via `eval_oracle.py` (pass@K).
+
+4. **Taxonomie d'erreurs raffinée** (`analyze_eval.py`) : `other_error` → `multi_action`
+   (« Only one Action allowed »), `generic_fail` → `item_not_found` (« Could not find
+   <objet> »). Légende des erreurs dans chaque `analysis.txt` ; écart-type des tours
+   (`StdRnd`) au résumé par depth. Dashboard multi-modèles (`compare_dashboard.py` →
+   `docs/dashboard/` : 6 PNG + `tables.txt`).
+
+5. **Diagnostic pass@k par depth dans `eval_vllm.py`** (`--passk K`, défaut off ; pass@1
+   intact). Réutilise `textcraft_test_with_depth.json`. But : tester si depth 3-4 est
+   *atteignable* par échantillonnage avant d'investir dans un curriculum (pass@k=0 ⇒ aucune
+   graine pour le RL, cf. Dr. GRPO). ⚠️ Sur depth4 (**3 items**) lire `succ/sample`
+   (24 essais, fin), pas `pass@k` (binaire/item → 4 valeurs). Coût (3,4)×8 = 224 rollouts.
+   Validé à sec seulement → **smoke test GPU obligatoire** (`--passk 2 --passk-depths 4`)
+   avant le run complet. Détail : `docs/hebdo/19juin/session_2026-06-16.md` §8.
+
+6. **Audit des 2 biais Dr. GRPO (arXiv:2503.20783) — inspection, pas de modif.**
+   - **Biais de longueur** : NI notre TRL (`loss_type="dapo"` → ÷ tokens du batch) NI le verl
+     AgentGym (`masked_mean(axis=None)` → ÷ tokens micro-batch) n'ont le biais *fort*
+     (par-réponse). Écart à Dr. GRPO (÷ constante `MAX_TOKENS`) = échelle de gradient, mineur.
+   - **Biais de difficulté (÷ std)** : **les deux dévient** — verl `core_algos.py:153`
+     `(scores-mean)/(std+eps)` ; notre TRL `scale_rewards` non posé ⇒ défaut `"group"` ⇒
+     `advantages /= (std+1e-4)`. Notre TRL réplique fidèlement verl (bon pour la réplication,
+     ≠ Dr. GRPO). Pour tester Dr. GRPO pur : `scale_rewards="none"` (ablation à 1 param,
+     peu risquée, à ne pas mélanger avec la réplication verl en cours).
+   Détail : `docs/hebdo/19juin/session_2026-06-16.md` §9.

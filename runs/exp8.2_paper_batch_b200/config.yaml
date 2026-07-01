@@ -1,0 +1,56 @@
+name: paper_batch_scalinginter_b200
+date: 2026-06-23
+description: >
+  Batch GRPO aligné papier AgentGym-RL TextCraft (32 prompts × N=8 = 256 traj/step)
+  + ScalingInter budget réduit: max_rounds 6→12→18→24, transitions aux epochs
+  0/4/8/12, run 20 epochs (~234 steps). Comparaison directe avec exp8.1 (64 traj/step).
+
+algorithm: GRPO (TRL) + vLLM in-process + ScalingInter (epoch-based)
+model: Qwen2.5-3B-Instruct
+script: src/train/train_grpo.py
+hardware: 1x B200 192 GB HBM3e
+
+training:
+  fine_tuning: Full FT (--full-ft)
+  num_generations: 8               # papier rollout.n=8
+  gradient_accumulation_steps: 256   # papier train_batch_size=32 × N=8
+  max_completion_length: 512
+  num_epochs: 20                   # budget réduit vs papier (30 ep)
+  max_rounds_schedule_epochs: "6:0,12:4,18:8,24:12"
+  eval_every: 11                      # 1× par epoch (220 steps / 20 ep ≈ 11 step/ep)
+  eval_items: 100
+  save_steps: 100000
+  dataset: data/train/textcraft_train.json
+
+command: >
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  python src/train/train_grpo.py
+    --full-ft
+    --num-generations 8
+    --gradient-accumulation-steps 256
+    --max-completion-length 512
+    --max-items 0
+    --num-epochs 20
+    --use-vllm-inprocess
+    --max-rounds-schedule-epochs "6:0,12:4,18:8,24:12"
+    --eval-every 11
+    --eval-items 100
+    --save-steps 100000
+    --run-name exp8.2_paper_batch_b200
+
+result:
+  pass_at_1_final: "16/100 (16%)"
+  pass_at_1_best: "20/100 (20%) @ step 187"
+  pass1_d1_best: "61%"
+  pass1_d2_final: "5%"
+  pass1_d3: "0%"
+  pass1_d4: "0%"
+  steps: 220
+  epochs: 20
+  wall_time_h: "~18.4"
+  checkpoint: saves/trl_grpo/exp8.2_paper_batch_b200_best/
+
+verdict: >
+  Batch papier (256 traj/step) + ScalingInter budget 20 ep : best 20/100 vs baseline 18/100,
+  légèrement au-dessus mais loin du papier 75/100. Depth 2 apparaît (5% final) mais
+  depth 3/4 restent à 0. Pas de gain net vs exp8.1 (best 25% in-loop, 19% saved).
