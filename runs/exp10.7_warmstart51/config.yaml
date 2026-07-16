@@ -1,0 +1,52 @@
+name: exp10.7_warmstart51
+date: 2026-07-02
+description: >
+  Warm-start depuis le meilleur point atteint jusqu'ici : le modèle fusionné
+  exp10.5 best (step 368, 51/100). On repart de cette policy à 51% et on continue
+  le GRPO LoRA au même LR doux que 10.6 (2.2e-6). Idée : au lieu de repartir de
+  35% et re-parcourir tout le chemin (avec le collapse au bout), on démarre déjà
+  haut et on grappille les derniers points sans laisser le run diverger.
+
+algorithm: GRPO (TRL + vLLM in-process), LoRA
+model: models/qwen25_3b_exp10p5_step368_51pct  # base exp10.3 35% + adapter best exp10.5 fusionné (51%)
+script: src/train/train_grpo.py
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+wandb: qhh5ma7t
+
+training:
+  fine_tuning: LoRA (pas de --full-ft)
+  optimizer: adamw_torch
+  num_generations: 8
+  gradient_accumulation_steps: 64  # 8 prompts × 8 gens = 64 trajectoires/step
+  max_completion_length: 512
+  max_steps: 400
+  learning_rate: 2.2e-6
+  beta_kl: 0.01
+  eval_every: 23
+  save_best_only: true
+
+command: >
+  python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0 --num-epochs 0
+    --max-steps 400 --learning-rate 2.2e-6 --beta 0.01
+    --save-best-only --use-vllm-inprocess
+    --eval-every 23 --eval-items 100
+    --model-path models/qwen25_3b_exp10p5_step368_51pct
+    --run-name exp10.7_warmstart51
+
+results:
+  best_pass_at_1: 53/100 (step 92)
+  best_checkpoint: saves/trl_grpo/exp10.7_warmstart51_best  # adapter PEFT seul
+  eval_curve: >
+    step 23: 45 | 46: 46 | 69: 44 | 92: 53 (BEST) | 115: 45 | 138: 39 | 161: 52
+    — run interrompu au step 163/400
+  per_depth_at_best (step 92): "d1=0.90 | d2=0.56 | d3=0.08 | d4=0.00"
+
+verdict: >
+  Meilleur score TRL du projet : 53/100 (step 92), à comparer à 38 (verl exp6)
+  et 51 (exp10.5). Le warm-start fonctionne : on démarre déjà à 45% au step 23.
+  Progression bruitée (oscille 39–53) puis run interrompu au step 163 (arrêt
+  compte/crédit). Le gain reste concentré sur d1/d2 ; d3 encore à 8% et d4 à 0%
+  — le mur depth 4 n'est pas franchi. Suite : exp10.8 = reprise depuis ce best
+  (53%) avec LR encore divisé par 3 (2.2e-6 → 7.33e-7) pour stabiliser.

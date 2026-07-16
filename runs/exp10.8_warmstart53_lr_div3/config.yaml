@@ -1,0 +1,72 @@
+name: exp10.8_warmstart53_lr_div3
+date: 2026-07-07
+description: >
+  Reprise de exp10.7 depuis son best checkpoint (step 92, 53/100), avec le LR
+  divisé par 3 (2.2e-6 → 7.333e-7). Suite logique du warm-start : 10.7 a montré
+  que repartir haut fonctionne mais oscille (39–53) ; on baisse encore le LR pour
+  stabiliser la fin de courbe et tenter de dépasser 53 sans re-déclencher le
+  collapse observé sur les runs longs.
+
+algorithm: GRPO (TRL + vLLM in-process), LoRA
+model: models/qwen25_3b_exp10p7_step92_53pct  # base exp10.5 51% + adapter best exp10.7 fusionné (53%)
+script: src/train/train_grpo.py
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+wandb: bfkkqcaj
+
+training:
+  fine_tuning: LoRA (pas de --full-ft)
+  optimizer: adamw_torch
+  num_generations: 8
+  gradient_accumulation_steps: 64  # 8 prompts × 8 gens = 64 trajectoires/step
+  max_completion_length: 512
+  max_steps: 400
+  learning_rate: 7.333e-7          # 2.2e-6 / 3
+  beta_kl: 0.01
+  eval_every: 23
+  save_best_only: true             # best = adapter PEFT seul
+
+command: >
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0 --num-epochs 0
+    --max-steps 400 --learning-rate 7.333e-7 --beta 0.01
+    --save-best-only --use-vllm-inprocess
+    --eval-every 23 --eval-items 100
+    --model-path models/qwen25_3b_exp10p7_step92_53pct
+    --run-name exp10.8_warmstart53_lr_div3
+
+lineage: >
+  exp10.3 (35%) --LoRA/1.5--> exp10.5 best 51% (merge: qwen25_3b_exp10p5_step368_51pct)
+  --warmstart LoRA--> exp10.7 best 53% (merge: qwen25_3b_exp10p7_step92_53pct)
+  --warmstart LoRA lr/3--> exp10.8 (ce run)
+
+hypotheses:
+  H1: >
+    Un LR 3× plus doux à partir de 53% laisse la policy grappiller quelques points
+    supplémentaires (d2 monte, d3 commence à décoller) sans re-déclencher le
+    collapse (completions qui explosent en longueur, KL qui diverge).
+  H2: >
+    Si le run stagne autour de 53 sans progresser, on aura la confirmation que le
+    plafond du 3B en LoRA/GRPO pur sur cette recette est ~53, et qu'il faut changer
+    de levier (full-ft, curriculum depth, CoT) pour aller plus loin.
+
+results:
+  best_pass_at_1_eval_train: 58/100 (step 368, pic éval en cours d'entraînement)
+  best_pass_at_1_reeval: 54/100 (re-éval indépendante eval_vllm du best mergé, 2026-07-08)
+  best_checkpoint: saves/trl_grpo/exp10.8_warmstart53_lr_div3_best  # adapter PEFT seul
+  merged_model: qwen25_3b_exp10p8_step368_58pct (scratchpad, à re-merger si besoin)
+  eval_curve: >
+    step 23: 48 | 46: 49 | 69: 43 | 92: 48 | 115: 48 | 138: 47 | 161: 45 |
+    184: 47 | 207: 55 | 230: 54 | 253: 46 | 276: 52 | 299: 53 | 322: 40 |
+    345: 49 | 368: 58 (pic) | 391: 49 — run complet 400/400 steps
+
+verdict: >
+  Meilleur modèle du projet, mais chiffre honnête = ~54/100 (vs 53 exp10.7,
+  38 verl exp6, papier 75), PAS 58. Le 58 du step 368 est un pic isolé d'une
+  courbe d'éval mono-tirage bruitée (voisins : 345=49, 391=49) ; la re-éval
+  indépendante donne 54 (winner's curse — biais de sélection sur le bruit,
+  commun à tous nos "best"). H1 validée : le LR÷3 progresse depuis 53 % sans
+  collapse (run complet 400 steps, completions saines). Merge validé correct
+  (54 ≫ base 18). Reasoning pur du best = 19/100 ≈ base (cf. exp16_best58_*,
+  docs/hebdo/10juillet/) → le gain RL est réactif, pas de planification.

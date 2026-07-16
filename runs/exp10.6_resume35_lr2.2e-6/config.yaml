@@ -1,0 +1,46 @@
+name: exp10.6_resume35_lr2.2e-6
+date: 2026-07-02
+description: >
+  Variante de exp10.5 : même base (modèle fusionné exp10.3 step 414, 35/100)
+  mais LR encore plus bas, 2.2e-6 au lieu de 3.333e-6. Objectif : voir si un LR
+  ~2× plus doux que 10.5 retarde encore le collapse observé après ~step 400.
+
+algorithm: GRPO (TRL + vLLM in-process), LoRA
+model: models/qwen25_3b_exp10p3_step414_35pct  # Qwen2.5-3B + adapter exp10.3 fusionné (35%)
+script: src/train/train_grpo.py
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+wandb: mp2hl1tm
+
+training:
+  fine_tuning: LoRA (pas de --full-ft)
+  optimizer: adamw_torch
+  num_generations: 8
+  gradient_accumulation_steps: 64  # 8 prompts × 8 gens = 64 trajectoires/step
+  max_completion_length: 512
+  max_steps: 400
+  learning_rate: 2.2e-6
+  beta_kl: 0.01
+  eval_every: 23
+  save_best_only: true
+
+command: >
+  python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0 --num-epochs 0
+    --max-steps 400 --learning-rate 2.2e-6 --beta 0.01
+    --save-best-only --use-vllm-inprocess
+    --eval-every 23 --eval-items 100
+    --model-path models/qwen25_3b_exp10p3_step414_35pct
+    --run-name exp10.6_resume35_lr2.2e-6
+
+results:
+  best_pass_at_1: 34/100 (step 23)
+  best_checkpoint: saves/trl_grpo/exp10.6_resume35_lr2.2e-6_best  # adapter PEFT seul
+  eval_curve: "step 23: 34 (BEST) — run interrompu au step ~42"
+
+verdict: >
+  Run ABANDONNÉ précocement (arrêt vers step 42). Entre-temps exp10.5 avait
+  atteint 51/100, dont le best fusionné (models/qwen25_3b_exp10p5_step368_51pct)
+  offrait un bien meilleur point de départ que la base 35%. On a donc abandonné
+  ce départ à 35% pour lancer exp10.7 (warm-start depuis 51%). Config conservée
+  pour traçabilité — ne pas réutiliser comme référence.

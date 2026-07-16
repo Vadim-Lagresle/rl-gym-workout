@@ -1,0 +1,53 @@
+name: exp10.5_resume35_lr_div1.5
+date: 2026-07-01
+description: >
+  Reprise LoRA depuis le modèle fusionné exp10.3 step 414 (35/100), avec le
+  learning rate divisé par 1.5 (5e-6 → 3.333e-6). Hypothèse : le collapse
+  observé en fin d'exp10.3/10.4 vient d'un LR trop agressif une fois la policy
+  au-dessus de ~35% ; un LR plus doux devrait prolonger la progression.
+
+algorithm: GRPO (TRL + vLLM in-process), LoRA
+model: models/qwen25_3b_exp10p3_step414_35pct  # Qwen2.5-3B + adapter exp10.3 fusionné (35%)
+script: src/train/train_grpo.py
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+wandb: ycgt60v1
+
+training:
+  fine_tuning: LoRA (pas de --full-ft)
+  optimizer: adamw_torch
+  num_generations: 8            # N=8, groupe GRPO
+  gradient_accumulation_steps: 64  # 8 prompts × 8 gens = 64 trajectoires/step
+  max_completion_length: 512    # par tour
+  max_steps: 600
+  learning_rate: 3.333e-6       # 5e-6 / 1.5
+  beta_kl: 0.01
+  eval_every: 23                # éval test 100 items
+  save_best_only: true          # best = adapter PEFT seul (fix disque, cf. diff train_grpo.py)
+
+command: >
+  python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0 --num-epochs 0
+    --max-steps 600 --learning-rate 3.333e-6 --beta 0.01
+    --save-best-only --use-vllm-inprocess
+    --eval-every 23 --eval-items 100
+    --model-path models/qwen25_3b_exp10p3_step414_35pct
+    --run-name exp10.5_resume35_lr_div1.5
+
+results:
+  best_pass_at_1: 51/100 (step 368)
+  best_checkpoint: saves/trl_grpo/exp10.5_resume35_lr_div1.5_best  # adapter PEFT seul
+  merged_model: models/qwen25_3b_exp10p5_step368_51pct  # base 35% + adapter, via logs/merge_exp10p5.py
+  eval_curve: >
+    step 23: 31 | 46: 30 | 69: 33 | 92: 37 | 115: 34 | 138: 32 | 161: 38 |
+    184: 43 | 207: 37 | 230: 42 | 253: 31 | 276: 40 | 299: 40 | 322: 45 |
+    345: 43 | 368: 51 (BEST) | 391: 43 | 414: 33 | 437: 22 | 460: 9 |
+    483: 12 | 506: 3 — puis éval en échec au step 529 (prompt 16398 > max_model_len 16384)
+
+verdict: >
+  Record TRL à l'époque du run : 51/100 (vs 38 verl exp6). Mais collapse net
+  après ~step 400 : les completions dégénèrent (mean_length 250 → 6500 tokens,
+  KL 0 → 0.2-0.3, invalid_steps ≈ 20/20), l'éval s'effondre 51 → 3. Le run
+  s'arrête vers le step 530/600. Confirme que même à LR réduit, le training
+  long finit par diverger — d'où la stratégie warm-start (exp10.7) : repartir
+  du best fusionné avec un LR encore plus bas.

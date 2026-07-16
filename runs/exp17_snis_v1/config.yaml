@@ -1,0 +1,61 @@
+name: exp17_snis_v1
+date: 2026-07-09
+description: >
+  Premier run GRPO + SNIS v1 : à partir de G=8 épisodes réels par prompt, la
+  rollout_func fabrique M=32 trajectoires combinées par échantillonnage ancestral
+  SNIS (recombinaison des tours entre trajectoires, poids ω ∝ π^α renormalisés).
+  Objectif : 4× plus de données de gradient pour le même coût d'environnement
+  (réponse à l'insight « GRPO sparse = majorité de steps sans signal »).
+  Maths : docs/hebdo/10juillet/snis_derivation.tex.
+
+algorithm: GRPO + SNIS v1 (TRL + vLLM in-process), full-FT
+model: models/Qwen2.5-3B-Instruct
+script: src/train/train_grpo_snis.py
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+wandb: 31r6lvsj
+
+training:
+  fine_tuning: full-FT (--full-ft)
+  optimizer: adamw_bnb_8bit
+  num_generations: 32              # M = combos par prompt (taille de groupe TRL)
+  snis_real_rollouts: 8            # G = épisodes réels joués par prompt
+  snis_keep_originals: 4           # 4 trajectoires originales conservées parmi les 32
+  snis_alpha: 1.0
+  snis_score_batch_size: 24
+  snis_max_ctx_tokens: 15000
+  snis_seed: 0
+  gradient_accumulation_steps: 256 # 8 prompts × 32 combos = 256 traj/step
+  max_completion_length: 512
+  max_steps: 100
+  learning_rate: 1e-6
+  beta_kl: 0.001
+  lr_scheduler: constant
+  eval_every: 10                   # 100 items
+
+command: >
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  python src/train/train_grpo_snis.py --full-ft --num-generations 32
+    --snis-real-rollouts 8 --snis-keep-originals 4 --snis-score-batch-size 24
+    --gradient-accumulation-steps 256 --max-completion-length 512
+    --max-items 0 --max-steps 100 --learning-rate 1e-6
+    --eval-every 10 --eval-items 100 --save-best-only
+    --use-vllm-inprocess --run-name exp17_snis_v1
+
+results:
+  status: interrompu — vLLM EngineDeadError au step ~53 (2026-07-10 02:49)
+  eval_curve: "step 10: 10 | 20: 13 | 30: 15 | 40: 15 | 50: 13"
+  best_pass_at_1: 15/100 (steps 30-40)
+  best_checkpoint: saves/trl_grpo/exp17_snis_v1_best
+  snis_diagnostics: >
+    ESS_norm ≈ 0.13-0.16 (poids concentrés, w_max ≈ 0.97), Δlen_choisi ≈ -10 à
+    -20 tok (léger biais tours courts), fins: 32 orig + 224 source_end + 0 budget.
+    Coût scoring : 20-30k jobs (~30-40 Mtok, 6-10 min) par step vs rollout 22 s —
+    le scoring HF domine largement le temps de step.
+
+verdict: >
+  Pas de décollage au-dessus de la baseline (15 vs 18) en 53 steps. Deux signaux
+  à creuser avant un v2 : (1) l'ESS bas (~0.14) indique que l'échantillonnage
+  ancestral choisit presque toujours le même candidat — les combos ressemblent
+  aux originaux permutés ; (2) le coût du scoring (6-10 min/step) rend le run
+  ~15× plus lent qu'un GRPO pur à budget env égal. Run tué par un crash moteur
+  vLLM (EngineDeadError pendant la génération), pas par une divergence.

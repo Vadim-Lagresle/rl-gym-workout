@@ -1,0 +1,36 @@
+name: exp16_blind_extraction_3b
+date: 2026-07-08
+description: >
+  Ablation "extracteur aveugle" de exp16 (Qwen2.5-3B). Même pipeline que
+  exp16_single_turn_reasoning phase 2, mais le prompt d'extraction JSON ne
+  contient NI les recettes NI le goal : l'extracteur traduit littéralement le
+  plan, sans pouvoir le compléter (get manquants) ni le réparer (noms, ordre,
+  quantités). Mesure la part du score attribuable à l'extracteur informé
+  plutôt qu'au plan lui-même. Suite de l'audit du 08/07.
+
+model: Qwen2.5-3B-Instruct (extracteur ET planificateur — plans réutilisés de exp16)
+plans_source: runs/exp16_single_turn_reasoning/plans/  # inchangés, lecture seule
+script: src/eval/replay_single_turn_plans.py --blind
+
+command: >
+  python src/eval/replay_single_turn_plans.py
+    --model <path>/Qwen2.5-3B-Instruct
+    --run-name exp16_blind_extraction_3b
+    --plans-dir runs/exp16_single_turn_reasoning/plans
+    --blind
+
+result:
+  pass_at_1_blind: 12/100
+  by_depth: {d1: "9/31", d2: "3/41", d3: "0/25", d4: "0/3"}
+  extraction_errors: 8/100
+  reference_informed: 20/100  # exp16_single_turn_reasoning
+  flips_informed_ok_to_blind_fail: 11
+  flips_informed_fail_to_blind_ok: 3
+
+verdict: >
+  L'extracteur informé (recettes + goal dans le prompt) apporte +8 points nets
+  (20 vs 12), soit 40 % du score affiché d'exp16. Ce qu'il répare : étapes get
+  implicites, normalisation des noms d'items vers le vocabulaire des recettes,
+  quantités/ordre, discipline de schéma. Le "reasoning pur" du plan 3B seul
+  vaut donc plutôt ~12/100 (borne basse : la traduction littérale est
+  volontairement stricte). Encadrement honnête : 12 ≤ vrai score ≤ 20.

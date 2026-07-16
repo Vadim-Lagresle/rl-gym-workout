@@ -1,0 +1,18 @@
+name: exp16_3b_temp1
+date: 2026-07-08
+description: >
+  exp16 (reasoning pur) rejoué avec plans générés à temperature 1.0 (au lieu
+  de 0.7) pour aligner le décodage sur l'éval multi-tour (eval_vllm, temp 1.0).
+  Pipeline audit-fixé (extraction 2048 tokens, parsing tolérant).
+model: Qwen2.5-3B-Instruct
+plan_temperature: 1.0
+result:
+  informed: "14/100 [d1 13/31, d2 1/41, d3 0/25, d4 0/3]"
+  blind: "12/100 [d1 10/31, d2 2/41] (runs/exp16_blind_3b_temp1/)"
+  reference_temp07: "informé 20/100, blind 12/100"
+verdict: >
+  -6 pts vs temp 0.7 en informé (20→14), dans le sens prédit (bruit de
+  sampling en pass@1 mono-tirage) mais à la limite de la significativité
+  (bruit binomial ~±4). depth 2 s'effondre (7/41→1/41) : les plans temp 1.0
+  sont plus erratiques et l'extracteur ne les rattrape plus (écart
+  informé-aveugle : 2 pts vs 8 pts à temp 0.7).

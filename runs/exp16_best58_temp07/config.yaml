@@ -1,0 +1,22 @@
+name: exp16_best58_temp07
+date: 2026-07-08
+description: >
+  Reasoning pur (pipeline exp16 audit-fixé) appliqué au MEILLEUR modèle RL du
+  projet : best exp10.8 (~54/100 multi-tour re-éval ; 58 = pic bruité step 368), mergé
+  (qwen25_3b_exp10p8_step368_58pct). Plans à temperature 0.7 (comme exp16
+  d'origine). Question : le RL a-t-il amélioré la planification one-shot ou
+  seulement le contrôle réactif en environnement ?
+model: qwen25_3b_exp10p8_step368_58pct (base+LoRA exp10.8 mergé ; extracteur = lui-même)
+plan_temperature: 0.7
+result:
+  informed: "19/100 (9 err) [d1 14/31, d2 5/41, d3 0/25, d4 0/3]"
+  blind: "16/100 (11 err) (runs/exp16_blind_best58_temp07/)"
+  reference_base_3b: "informé 20/100, blind 12/100"
+  reference_multiturn: "54/100 (re-éval indépendante ; 58 = pic bruité step 368)"
+verdict: >
+  RÉSULTAT CLÉ : 19/100 ≈ base 3B (20/100) alors que le multi-tour a triplé
+  (18→54). Le GRPO LoRA n'a RIEN transféré à la planification one-shot — tout
+  le gain RL est dans la politique réactive (agir/observer/corriger). Les
+  plans best58 sont d'ailleurs stylistiquement identiques à ceux de la base
+  (même verbosité, mêmes détours inutiles). Seul gain marginal : blind 16 vs
+  12 (plans un peu plus littéralement exécutables).

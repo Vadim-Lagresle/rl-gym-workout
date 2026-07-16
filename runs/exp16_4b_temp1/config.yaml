@@ -1,0 +1,16 @@
+name: exp16_4b_temp1
+date: 2026-07-08
+description: >
+  exp16 reasoning pur, Qwen3.5-4B, plans à temperature 1.0 (alignement sur
+  l'éval multi-tour). Backend HF --no-thinking (vLLM 0.9.1 ne supporte pas
+  Qwen3.5). Pipeline audit-fixé. Pas d'ablation blind (temps HF).
+model: Qwen3.5-4B
+plan_temperature: 1.0
+result:
+  informed: "49/100 (2 err) [d1 22/31, d2 20/41, d3 7/25, d4 0/3]"
+  reference_temp07: "informé 54/100, blind 46/100"
+verdict: >
+  -5 pts vs temp 0.7 (54→49), à la limite du bruit binomial (±5) mais cohérent
+  avec le recul observé sur les deux autres modèles (-6, -5) : pénalité
+  temp 1.0 systématique en pass@1 mono-tirage. Le profil par depth est
+  préservé (d3 reste ~7-8, d4 = 0).

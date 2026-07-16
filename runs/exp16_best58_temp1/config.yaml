@@ -1,0 +1,16 @@
+name: exp16_best58_temp1
+date: 2026-07-08
+description: >
+  Idem exp16_best58_temp07 mais plans à temperature 1.0 (température de l'éval
+  multi-tour et des rollouts GRPO d'entraînement).
+model: qwen25_3b_exp10p8_step368_58pct
+plan_temperature: 1.0
+result:
+  informed: "14/100 (3 err) [d1 10/31, d2 4/41, d3 0/25, d4 0/3]"
+  blind: "9/100 (7 err) (runs/exp16_blind_best58_temp1/)"
+  reference_temp07: "informé 19/100, blind 16/100"
+verdict: >
+  Même recul que la base 3B à temp 1.0 (19→14, comme 20→14) : la température
+  d'entraînement RL (1.0) ne confère AUCUNE robustesse au sampling en
+  planification one-shot. Cohérent avec le verdict temp07 : le gain RL est
+  purement réactif.
