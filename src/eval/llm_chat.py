@@ -1,8 +1,14 @@
-"""Génération chat pour scripts eval exp16 (vLLM ou HuggingFace)."""
+"""Génération chat à 2 backends (serveur vLLM ou HuggingFace in-process).
+
+`ChatGenerator` est LE point d'entrée : il résout le backend (`auto` = vllm si
+l'archi est servable par la vLLM installée, sinon HF — indispensable pour les
+archis récentes type Qwen3.5 bloquées par vLLM 0.9.1/glibc 2.28) puis expose
+`.generate(messages, max_tokens, temperature)`. Utilisé par eval_textcraft.py,
+eval_oracle.py et le pipeline exp16 (single_turn/).
+"""
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -23,8 +29,7 @@ def resolve_model_ref(model: str) -> str:
 
 
 def vllm_supports_model(model_ref: str) -> bool:
-    sys.path.insert(0, str(REPO_ROOT / "src" / "utils"))
-    from vllm_supports import vllm_supports  # noqa: WPS433
+    from src.utils.vllm_supports import vllm_supports  # import différé : vllm est lourd
 
     return vllm_supports(model_ref)
 

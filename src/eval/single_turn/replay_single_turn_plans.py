@@ -33,13 +33,16 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))  # racine du repo → imports src.*
+
 from agentenv.envs import TextCraftEnvClient
 
-from llm_chat import ChatGenerator, VLLM_SERVER_URL
+from src.eval.llm_chat import ChatGenerator, VLLM_SERVER_URL
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-PLANS_DIR_DEFAULT = REPO_ROOT / "runs" / "exp16_single_turn_reasoning" / "plans"
+REPO_ROOT = Path(__file__).resolve().parents[3]
+PLANS_DIR_DEFAULT = REPO_ROOT / "runs" / "8_single_turn_exp16" / "core" / "exp16_single_turn_reasoning" / "plans"
 DEPTH_MAP_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test_with_depth.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 MAX_ACTIONS = 50

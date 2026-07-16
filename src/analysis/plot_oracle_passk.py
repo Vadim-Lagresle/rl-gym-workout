@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import json
-from math import comb
 from pathlib import Path
 from collections import defaultdict
 
@@ -41,14 +40,10 @@ REFERENCE_MODELS = [
 ]
 
 
-# ── estimateur non biaisé pass@k (Chen et al. 2021) ──────────────────────────
-
-def pass_at_k(n: int, c: int, k: int) -> float:
-    if k >= n:
-        return 1.0 if c > 0 else 0.0
-    if n - c < k:
-        return 1.0
-    return 1.0 - comb(n - c, k) / comb(n, k)
+# ── estimateur non biaisé pass@k (Chen et al. 2021) — source unique ──────────
+import sys
+sys.path.insert(0, str(REPO_ROOT))
+from src.eval.textcraft_common import pass_at_k  # noqa: E402
 
 
 # ── lecture données ───────────────────────────────────────────────────────────

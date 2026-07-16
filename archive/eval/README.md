@@ -9,5 +9,9 @@
 | `analyze_gemini.py` | analyse par depth recalculée via subprocess conda (le fichier depth JSON existe maintenant) ; bug `DATASET_PATH` non défini | `src/analysis/compare_dashboard.py` |
 | `summarize_eval.py` | sous-ensemble strict d'`analyze_eval.py` (CSV + taux de succès) | `src/analysis/analyze_eval.py --eval-dir <dir>` |
 | `auto_eval.sh` | workflow d'éval verl 4-GPU (stack legacy exp1-6) | stack TRL : `eval_textcraft.py` |
-| `eval_fullft.py` (arrivé à l'étape 4) | boucle épisode HF dupliquée | `eval_textcraft.py --backend hf` |
-| `eval_vllm.py` (étape 4, renommé) | devenu le tronc de `eval_textcraft.py` | `eval_textcraft.py --backend vllm` |
+| `eval_fullft.py` | boucle épisode HF dupliquée — absorbée comme backend | `eval_textcraft.py --backend hf` |
+| `eval_oracle_hf.py` | variante HF de l'oracle — absorbée comme backend (passes.jsonl résumables conservées) | `eval_oracle.py --backend hf` |
+| `run_eval_auto.sh` | le choix automatique vllm/hf est intégré au script Python | `eval_textcraft.py --backend auto` (serveur vLLM à lancer soi-même si compatible) |
+
+NB : `eval_vllm.py` n'est pas ici — il a été **renommé** `src/eval/eval_textcraft.py`
+(git mv, historique conservé) puis réécrit autour de `textcraft_common` + `llm_chat`.
