@@ -42,6 +42,7 @@ from src.eval.textcraft_common import (
     DEFAULT_SYSTEM_PROMPT,
     ENV_SERVER_URL,
     EpisodeResult,
+    REPO_ROOT,
     RUNS_DIR,
     load_depth_map,
     load_existing_log,
@@ -184,6 +185,15 @@ def main() -> None:
                         help="Qwen3/3.5 : enable_thinking=False (actions directes, pas de <think>) — backend hf")
     parser.add_argument("--vllm-url", type=str, default=VLLM_SERVER_URL,
                         help="URL du serveur vLLM (défaut: http://127.0.0.1:8001)")
+    parser.add_argument("--fewshot", type=int, default=0,
+                        help="Nb d'exemples résolus injectés dans le message de règles "
+                             "(0 = zero-shot, protocole historique). Exemples issus des 70 "
+                             "recettes HORS train/test (voir build_fewshot_examples.py). "
+                             "NB : k>=20 nécessite un serveur vLLM à 32768 "
+                             "(start_vllm_server.sh <model> 32768).")
+    parser.add_argument("--fewshot-file", type=str,
+                        default=str(REPO_ROOT / "data" / "eval" / "textcraft_fewshot_examples.json"),
+                        help="Fichier JSON des exemples (défaut : data/eval/textcraft_fewshot_examples.json)")
     parser.add_argument("--passk", type=int, default=0,
                         help="Si >0 : lance le diagnostic pass@K par depth (au lieu du pass@1).")
     parser.add_argument("--passk-depths", type=str, default="3,4",
@@ -195,10 +205,33 @@ def main() -> None:
     gen = ChatGenerator(model_ref=args.model, backend=args.backend,
                         vllm_url=args.vllm_url, no_thinking=args.no_thinking)
 
+    fewshot_block = None
+    if args.fewshot > 0:
+        import json
+        with open(args.fewshot_file) as f:
+            examples = json.load(f)
+        if args.fewshot > len(examples):
+            raise SystemExit(f"--fewshot {args.fewshot} > {len(examples)} exemples disponibles "
+                             f"dans {args.fewshot_file}")
+        picked = examples[:args.fewshot]
+        parts = [f"Here are {args.fewshot} solved example task(s). Follow the same "
+                 f"reasoning and action format:"]
+        for i, e in enumerate(picked, start=1):
+            parts.append(f"=== EXAMPLE {i} ===\n{e['block']}")
+        parts.append("=== END OF EXAMPLES ===\nNow solve the new task I will give you.")
+        fewshot_block = "\n\n".join(parts)
+        from collections import Counter
+        print(f"[fewshot] k={args.fewshot} exemples injectés "
+              f"(depths {dict(Counter(e['depth'] for e in picked))}, "
+              f"{len(fewshot_block)} caractères)")
+
     items = load_items(args.max_items)
 
     # --- Mode diagnostic pass@K par depth (n'exécute PAS le pass@1 standard) ---
     if args.passk > 0:
+        if fewshot_block:
+            raise SystemExit("--passk + --fewshot non combinés pour l'instant "
+                             "(le mode passk reste zero-shot).")
         depths = tuple(int(x) for x in args.passk_depths.split(","))
         depth_map = load_depth_map()
         passk_log_dir = RUNS_DIR / args.run_name / "eval_logs_passk"
@@ -236,7 +269,8 @@ def main() -> None:
         for i, item in enumerate(todo):
             item_id = item["item_id"]
             try:
-                r = run_episode(generate_fn, client, item_id, system_prompt=args.system_prompt)
+                r = run_episode(generate_fn, client, item_id, system_prompt=args.system_prompt,
+                                fewshot_block=fewshot_block)
             except Exception as e:
                 print(f"[eval][{i+1}/{len(todo)}] {item_id} CRASHED: {e}")
                 continue

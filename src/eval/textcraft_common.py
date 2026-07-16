@@ -69,14 +69,19 @@ def load_depth_map(path: Path = DEPTH_MAP_PATH) -> dict[str, int]:
 
 
 def build_initial_messages(client: TextCraftEnvClient,
-                           system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> list[dict]:
-    """system? + règles du jeu + ack précodé + observation initiale.
+                           system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+                           fewshot_block: str | None = None) -> list[dict]:
+    """system? + règles du jeu (+ exemples few-shot) + ack précodé + observation initiale.
 
     Si system_prompt est vide (ex. Gemma-3 qui rejette le rôle system), on
-    démarre directement sur le message user."""
+    démarre directement sur le message user. fewshot_block (exp18) : bloc
+    d'exemples résolus injecté À LA FIN du message de règles — la structure
+    des tours reste identique au zero-shot (seul le 1er message user grossit)."""
     rules_msg = client.conversation_start[0]["value"]
     ack_msg = client.conversation_start[1]["value"]
     initial_obs = client.observe()
+    if fewshot_block:
+        rules_msg = rules_msg + "\n\n" + fewshot_block
     msgs = []
     if system_prompt:
         msgs.append({"role": "system", "content": system_prompt})
@@ -90,14 +95,16 @@ def build_initial_messages(client: TextCraftEnvClient,
 
 def run_episode(generate_fn: GenerateFn, client: TextCraftEnvClient, item_id: str,
                 system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-                max_rounds: int = MAX_ROUNDS) -> EpisodeResult:
+                max_rounds: int = MAX_ROUNDS,
+                fewshot_block: str | None = None) -> EpisodeResult:
     """LA boucle d'épisode d'éval : reset → (générer → step env → observer)*.
 
     generate_fn est le seul point de variation entre backends (serveur vLLM avec
     KV cache, HF generate, API externe) — voir llm_chat.ChatGenerator."""
     item_idx = item_id_to_idx(item_id)
     client.reset(item_idx)
-    messages = build_initial_messages(client, system_prompt=system_prompt)
+    messages = build_initial_messages(client, system_prompt=system_prompt,
+                                      fewshot_block=fewshot_block)
     t0 = time.time()
     reward = 0.0
     done = False

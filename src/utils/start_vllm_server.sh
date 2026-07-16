@@ -1,12 +1,14 @@
 #!/bin/bash
 # Lance un serveur vLLM compatible OpenAI sur le port 8001.
-# Usage : bash src/utils/start_vllm_server.sh <chemin_checkpoint>
+# Usage : bash src/utils/start_vllm_server.sh <chemin_checkpoint> [max_model_len]
 # Exemple : bash src/utils/start_vllm_server.sh models/Qwen2.5-3B-Instruct
+#           bash src/utils/start_vllm_server.sh models/Qwen2.5-3B-Instruct 32768  # prompts longs (few-shot)
 #
 # Le serveur tourne en arrière-plan. Pour l'arrêter : kill $(cat /tmp/vllm_server.pid)
 # Vérification : curl http://localhost:8001/health
 
 MODEL_PATH="${1:-models/Qwen2.5-3B-Instruct}"
+MAX_LEN="${2:-16384}"
 PORT=8001
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PYTHON="$HOME/envs/agentgym-rl/bin/python"
@@ -24,7 +26,7 @@ nohup "$PYTHON" -m vllm.entrypoints.openai.api_server \
     --port "$PORT" \
     --dtype bfloat16 \
     --gpu-memory-utilization 0.45 \
-    --max-model-len 16384 \
+    --max-model-len "$MAX_LEN" \
     --enable-prefix-caching \
     --trust-remote-code \
     > /tmp/vllm_server.log 2>&1 &
