@@ -1002,3 +1002,37 @@ optimiste). Script `src/eval/eval_oracle.py`. **Analyse détaillée : `runs/7_or
 - **Nuance** : le RL a quand même *déplacé la frontière* (depth-2 : +14 items atteignables ;
   depth-3 : +2 items, jamais résolus par la baseline) → depth 3 est à la limite, pas un mur infini.
 
+
+
+---
+
+### Exp 18 — few-shot prompting (2026-07-16, éval pure, aucun training)
+
+**Question** : combien de points le prompt seul peut-il apporter au Qwen2.5-3B base ?
+k exemples de tâches résolues injectés comme de VRAIS tours de dialogue (format
+ReAct), issus des 70 recettes de l'univers hors train/test (18 d2, 45 d3, 7 d4 —
+zéro contamination), chaque solution validée par replay env (70/70 reward=1).
+Ordre entrelacé d2,d3,d2,d3,d4, préfixes emboîtés. Serveur vLLM 32k. Détails et
+artefacts : `runs/0_baselines/exp18_fewshot/`.
+
+| k (exemples) | 0 | 1 | 3 | **5** | 10 | 20 | 30 | 50 |
+|---|---|---|---|---|---|---|---|---|
+| Pass@1 /100 | 18 | 25 | 30 | **31** | 30 | 30 | 20 | 22* |
+
+*k=50 : 99 items (1 crash). Par depth (k=5) : d1 25/31, d2 5/41, d3 1/25, d4 0/3.
+
+**Lectures** :
+1. **+13 pts sans aucun entraînement** (18 → 31, +72 % relatif) — comparable aux
+   premiers runs GRPO full-FT (exp7.x : 15-22 après des centaines de steps).
+2. Le gain vient de la **fiabilité depth 1-2** (d1 : 13→25/31) ; **depth ≥ 3 ne
+   bouge pas** (0-1 succès) → confirme le mur de capacité du diagnostic oracle,
+   que le prompting ne contourne pas.
+3. Plateau k=3-20 (~30), **dégradation k≥30** (8-14k tokens d'exemples : la
+   dilution du contexte long l'emporte sur l'information ajoutée).
+4. **Ablation format** (témoins `format_bloc_k01/k03` : 5 et 8/100) : des exemples
+   collés en bloc texte font halluciner les paires Action/Observation au modèle
+   (il écrit lui-même les réponses de l'env et se désynchronise). Les
+   démonstrations d'agent doivent être des tours de dialogue.
+
+**Suites possibles** : RL avec prompt few-shot k=5 (départ 31 au lieu de 18,
+plus de trajectoires à reward non nul pour GRPO) ; combinaison avec CoT tour 1.

@@ -1,0 +1,56 @@
+name: exp18_fewshot
+date: 2026-07-16
+description: >
+  Éval de prompting few-shot sur Qwen2.5-3B base (aucun entraînement) : k exemples
+  de tâches résolues injectés dans le prompt, k ∈ {1,3,5,10,20,30,50}, vs la
+  référence zero-shot exp1_baseline (18/100). Exemples issus des 70 recettes de
+  l'univers TextCraft ABSENTES du train ET du test (18 d2, 45 d3, 7 d4 ; aucune
+  d1 disponible) → zéro contamination. Chaque exemple = solution optimale dérivée
+  de CraftingTree et VALIDÉE par replay dans l'env (70/70 reward=1).
+
+algorithm: éval multi-tour standard (30 tours, T=1.0), prompt few-shot
+model: models/Qwen2.5-3B-Instruct
+script: src/eval/eval_textcraft.py --fewshot K --fewshot-format dialogue
+data: data/eval/textcraft_fewshot_examples.json (généré par src/utils/build_fewshot_examples.py)
+hardware: serveur vLLM 32768 tokens (start_vllm_server.sh <model> 32768 — requis pour k>=20)
+
+protocol:
+  exemples: >
+    ordre déterministe entrelacé d2,d3,d2,d3,d4 ; préfixes emboîtés
+    (exemples(k=3) ⊂ exemples(k=10) ⊂ …) → l'effet de k n'est pas confondu
+    avec un changement d'exemples ; solutions courtes d'abord à depth égale
+  budget_tokens_exemples: "k=1: 175 | k=5: 1055 | k=10: 2175 | k=20: 4768 | k=30: 8159 | k=50: 14397"
+  formats:
+    dialogue: exemples = vrais tours user/assistant (1 action par tour, ReAct) — format retenu
+    bloc: texte monolithique dans le message de règles — ABANDONNÉ (voir ci-dessous)
+
+results:
+  pass_at_1_par_k:  # format dialogue, 100 items (k50 : 99, 1 item crashé)
+    k0_reference: 18/100   # exp1_baseline (zero-shot)
+    k1: 25/100
+    k3: 30/100
+    k5: 31/100   # meilleur point
+    k10: 30/100
+    k20: 30/100
+    k30: 20/100
+    k50: 22/99
+  par_depth: >
+    Le gain vient de depth 1 (13/31 → 25/31 à k=5) et un peu de depth 2
+    (5/41 → 10/41 à k=20). Depth 3-4 : 0-1 succès partout — le mur de
+    capacité ne bouge pas avec le prompting, cohérent avec le diagnostic
+    oracle (7_oracle : pass@20 ≈ 0 à d3-4).
+  format_bloc_temoins: >
+    format_bloc_k01 = 5/100, format_bloc_k03 = 8/100 (sweep interrompu à k=5) :
+    les exemples en bloc texte font IMITER les paires Action/Observation → le
+    modèle hallucine les observations de l'env dans ses propres messages et se
+    désynchronise. Leçon de prompt engineering : les démonstrations d'agent
+    doivent être des tours de dialogue, pas du texte.
+
+verdict: >
+  Le few-shot en format dialogue apporte +13 pts (18 → 31/100 à k=5, +72 %
+  relatif) sans aucun entraînement — comparable au gain des premiers runs RL
+  (exp7.x : 15-22). Plateau à k=3-20 (~30), dégradation au-delà (20-22 à
+  k=30-50 : la dilution du contexte long l'emporte). Mais le prompting ne
+  débloque PAS depth>=3 : le mur reste un mur de capacité. À tester ensuite :
+  RL avec prompt few-shot k=5 (le modèle partirait de 31 au lieu de 18), et
+  combinaison avec le CoT structuré du tour 1.
