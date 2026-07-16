@@ -438,7 +438,7 @@ def main() -> None:
     if not depth_map:
         print("[analyze] Fichier depth non trouvé — colonne Depth affichée comme '?'")
         print("[analyze] Pour générer : source ~/envs/agentenv-textcraft/bin/activate")
-        print("[analyze]   && python src/utils/label_depths_test.py")
+        print("[analyze]   && python src/utils/label_depths.py --split test")
 
     print(f"[analyze] Analyse de {len(logs)} épisodes dans {eval_dir}\n")
 
