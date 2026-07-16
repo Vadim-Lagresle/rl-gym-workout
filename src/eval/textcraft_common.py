@@ -70,13 +70,23 @@ def load_depth_map(path: Path = DEPTH_MAP_PATH) -> dict[str, int]:
 
 def build_initial_messages(client: TextCraftEnvClient,
                            system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-                           fewshot_block: str | None = None) -> list[dict]:
+                           fewshot_block: str | None = None,
+                           fewshot_messages: list[dict] | None = None) -> list[dict]:
     """system? + règles du jeu (+ exemples few-shot) + ack précodé + observation initiale.
 
     Si system_prompt est vide (ex. Gemma-3 qui rejette le rôle system), on
-    démarre directement sur le message user. fewshot_block (exp18) : bloc
-    d'exemples résolus injecté À LA FIN du message de règles — la structure
-    des tours reste identique au zero-shot (seul le 1er message user grossit)."""
+    démarre directement sur le message user. Deux modes few-shot (exp18) :
+
+      - fewshot_block (format « bloc ») : bloc texte injecté À LA FIN du message
+        de règles. ⚠ Constat exp18 : le modèle imite les paires Action/Observation
+        du bloc et HALLUCINE les observations → dégrade (5-8/100 vs 18 zero-shot).
+        Conservé pour l'ablation.
+      - fewshot_messages (format « dialogue », recommandé) : les exemples sont de
+        VRAIS tours user/assistant insérés entre l'ack et la tâche réelle — le
+        modèle voit des tours assistants à UNE action qui s'arrêtent. Si la liste
+        se termine par un message user (l'observation finale du dernier exemple),
+        il est fusionné avec l'observation initiale de la vraie tâche pour ne pas
+        produire deux tours user consécutifs."""
     rules_msg = client.conversation_start[0]["value"]
     ack_msg = client.conversation_start[1]["value"]
     initial_obs = client.observe()
@@ -88,15 +98,23 @@ def build_initial_messages(client: TextCraftEnvClient,
     msgs += [
         {"role": "user", "content": rules_msg},
         {"role": "assistant", "content": ack_msg},
-        {"role": "user", "content": initial_obs},
     ]
+    if fewshot_messages:
+        turns = list(fewshot_messages)
+        if turns and turns[-1]["role"] == "user":
+            # Fusionne l'obs finale du dernier exemple avec la vraie tâche.
+            initial_obs = (turns.pop()["content"]
+                           + "\n\nNow solve this new task:\n\n" + initial_obs)
+        msgs += turns
+    msgs.append({"role": "user", "content": initial_obs})
     return msgs
 
 
 def run_episode(generate_fn: GenerateFn, client: TextCraftEnvClient, item_id: str,
                 system_prompt: str = DEFAULT_SYSTEM_PROMPT,
                 max_rounds: int = MAX_ROUNDS,
-                fewshot_block: str | None = None) -> EpisodeResult:
+                fewshot_block: str | None = None,
+                fewshot_messages: list[dict] | None = None) -> EpisodeResult:
     """LA boucle d'épisode d'éval : reset → (générer → step env → observer)*.
 
     generate_fn est le seul point de variation entre backends (serveur vLLM avec
@@ -104,7 +122,8 @@ def run_episode(generate_fn: GenerateFn, client: TextCraftEnvClient, item_id: st
     item_idx = item_id_to_idx(item_id)
     client.reset(item_idx)
     messages = build_initial_messages(client, system_prompt=system_prompt,
-                                      fewshot_block=fewshot_block)
+                                      fewshot_block=fewshot_block,
+                                      fewshot_messages=fewshot_messages)
     t0 = time.time()
     reward = 0.0
     done = False

@@ -194,6 +194,12 @@ def main() -> None:
     parser.add_argument("--fewshot-file", type=str,
                         default=str(REPO_ROOT / "data" / "eval" / "textcraft_fewshot_examples.json"),
                         help="Fichier JSON des exemples (défaut : data/eval/textcraft_fewshot_examples.json)")
+    parser.add_argument("--fewshot-format", choices=["dialogue", "bloc"], default="dialogue",
+                        help="dialogue (défaut) : exemples injectés comme de VRAIS tours "
+                             "user/assistant (1 action par tour, format ReAct). "
+                             "bloc : texte monolithique dans le message de règles — "
+                             "⚠ fait halluciner les observations au modèle (5-8/100 vs "
+                             "18 zero-shot, cf. exp18/format_bloc_*), gardé pour l'ablation.")
     parser.add_argument("--passk", type=int, default=0,
                         help="Si >0 : lance le diagnostic pass@K par depth (au lieu du pass@1).")
     parser.add_argument("--passk-depths", type=str, default="3,4",
@@ -206,6 +212,7 @@ def main() -> None:
                         vllm_url=args.vllm_url, no_thinking=args.no_thinking)
 
     fewshot_block = None
+    fewshot_messages = None
     if args.fewshot > 0:
         import json
         with open(args.fewshot_file) as f:
@@ -214,22 +221,56 @@ def main() -> None:
             raise SystemExit(f"--fewshot {args.fewshot} > {len(examples)} exemples disponibles "
                              f"dans {args.fewshot_file}")
         picked = examples[:args.fewshot]
-        parts = [f"Here are {args.fewshot} solved example task(s). Follow the same "
-                 f"reasoning and action format:"]
-        for i, e in enumerate(picked, start=1):
-            parts.append(f"=== EXAMPLE {i} ===\n{e['block']}")
-        parts.append("=== END OF EXAMPLES ===\nNow solve the new task I will give you.")
-        fewshot_block = "\n\n".join(parts)
+
+        if args.fewshot_format == "bloc":
+            # Format monolithique historique (ablation) — fait halluciner les
+            # observations : voir runs/0_baselines/exp18_fewshot/format_bloc_*.
+            parts = [f"Here are {args.fewshot} solved example task(s). Follow the same "
+                     f"reasoning and action format:"]
+            for i, e in enumerate(picked, start=1):
+                parts.append(f"=== EXAMPLE {i} ===\n{e['block']}")
+            parts.append("=== END OF EXAMPLES ===\nNow solve the new task I will give you.")
+            fewshot_block = "\n\n".join(parts)
+        else:
+            # Format dialogue (ReAct) : chaque exemple devient de vrais tours
+            # user (observation) / assistant (Thought + UNE action). L'obs finale
+            # de chaque exemple ouvre le message user suivant ; la toute dernière
+            # est fusionnée avec la vraie tâche par build_initial_messages.
+            fewshot_block = (f"I will first show you {args.fewshot} solved example task(s), "
+                             f"then give you a new task to solve.")
+            fewshot_messages = []
+            carry = None
+            for e in picked:
+                task = ("Crafting commands:\n" + "\n".join(e["commands"])
+                        + f"\n\nGoal: craft {e['goal_str']}.")
+                if carry:
+                    task = carry + "\n\n" + task
+                fewshot_messages.append({"role": "user", "content": task})
+                steps = e["steps"]
+                for j, st in enumerate(steps):
+                    if j == 0:
+                        content = f"Thought: {e['thought']}\n\nAction: {st['action']}"
+                    else:
+                        content = f"Action: {st['action']}"
+                    fewshot_messages.append({"role": "assistant", "content": content})
+                    if j < len(steps) - 1:
+                        fewshot_messages.append({"role": "user", "content": st["observation"]})
+                    else:
+                        carry = st["observation"]
+            if carry:
+                fewshot_messages.append({"role": "user", "content": carry})
+
         from collections import Counter
-        print(f"[fewshot] k={args.fewshot} exemples injectés "
+        n_turns = len(fewshot_messages) if fewshot_messages else 0
+        print(f"[fewshot] k={args.fewshot} exemples injectés, format={args.fewshot_format} "
               f"(depths {dict(Counter(e['depth'] for e in picked))}, "
-              f"{len(fewshot_block)} caractères)")
+              f"{n_turns} tours)" , flush=True)
 
     items = load_items(args.max_items)
 
     # --- Mode diagnostic pass@K par depth (n'exécute PAS le pass@1 standard) ---
     if args.passk > 0:
-        if fewshot_block:
+        if fewshot_block or fewshot_messages:
             raise SystemExit("--passk + --fewshot non combinés pour l'instant "
                              "(le mode passk reste zero-shot).")
         depths = tuple(int(x) for x in args.passk_depths.split(","))
@@ -270,7 +311,7 @@ def main() -> None:
             item_id = item["item_id"]
             try:
                 r = run_episode(generate_fn, client, item_id, system_prompt=args.system_prompt,
-                                fewshot_block=fewshot_block)
+                                fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
             except Exception as e:
                 print(f"[eval][{i+1}/{len(todo)}] {item_id} CRASHED: {e}")
                 continue

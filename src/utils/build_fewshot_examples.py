@@ -170,6 +170,15 @@ def main() -> None:
             "depth": depth,
             "n_actions": len(actions),
             "n_recipes": len(used_recipes),
+            # Champs structurés : permettent l'injection en format DIALOGUE
+            # (vrais tours user/assistant) — cf. eval_textcraft --fewshot-format.
+            "goal_str": item_id_to_str(item),
+            "commands": [r.recipe_str for r in used_recipes],
+            "thought": ("I check which ingredients are base items I can get, craft "
+                        "the intermediate items first, then craft the goal."),
+            "steps": [{"action": a, "observation": o}
+                      for a, o in zip(actions, observations)],
+            # Rendu monolithique (format « bloc », conservé pour l'ablation exp18)
             "block": render_block(item, used_recipes, actions, observations),
         })
     print(f"[fewshot] {len(examples)}/{len(held)} exemples validés par replay (reward=1)")
