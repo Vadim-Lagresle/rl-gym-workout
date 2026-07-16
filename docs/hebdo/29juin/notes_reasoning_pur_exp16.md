@@ -1,5 +1,13 @@
 # Notes pour la semaine du 29 juin — Reasoning pur (exp16) & erreurs d'extraction
 
+> ⚠️ **PARTIELLEMENT PÉRIMÉ — voir l'audit du 10 juillet**
+> (`docs/hebdo/10juillet/audit_exp16_reasoning_pur.md`) :
+> l'hypothèse « troncature max_tokens=1024 » de ce document est **réfutée**
+> (les erreurs d'extraction sont de la dégénérescence en boucle) ; et les
+> sweeps de température invalident tout verdict tiré d'un tirage isolé
+> (bruit mono-tirage ±5 pts). Les chiffres corrigés font foi dans
+> `docs/RESULTS.md` §(a)-(c).
+
 Consolidation de l'analyse du 26/06 sur les expés "reasoning pur" single-turn
 (plan texte libre → extraction JSON → replay TextCraft). À garder sous la main
 pour la pres et pour le débogage de la phase d'extraction.

@@ -5,6 +5,13 @@ leurs résultats numériques. Il est conçu pour être autonome : on doit
 pouvoir lire une section sans avoir à consulter le `WORKLOG.md` (qui lui
 est un journal chronologique, pas un référentiel de résultats).
 
+> **Note réorganisation 2026-07-16** : `runs/` est désormais classé par famille
+> (`0_baselines/ … 9_legacy_pre_b200/`, voir `runs/INDEX.md`). Les chemins
+> `runs/exp…` mentionnés dans les sections historiques ci-dessous s'y retrouvent
+> préfixés par leur famille (ex. `runs/exp16_*` → `runs/8_single_turn_exp16/{core,blind,sweep_*}/exp16_*`).
+> Côté scripts : `eval_vllm.py`/`eval_fullft.py` → `src/eval/eval_textcraft.py`
+> (`--backend vllm|hf`), pipeline exp16 → `src/eval/single_turn/`.
+
 Convention : "v2", "v3" etc. désignent des **versions successives du
 script de training** `scratch/07_trl_grpo_textcraft_smoke.py`, pas des
 versions de modèle au sens habituel. Le modèle base est toujours
@@ -610,8 +617,7 @@ déterministe dans l'env (sans LLM entre les steps). Métrique = **pass@1 oracle
 | Erreurs extraction JSON | 11 / 100 |
 | Wall time (collect + replay) | ~6 min |
 
-Artefacts : `runs/exp16_single_turn_reasoning/plans/`,
-`runs/exp16_single_turn_reasoning/replay_logs/`.
+Artefacts : `runs/8_single_turn_exp16/core/exp16_single_turn_reasoning/{plans,replay_logs}/`.
 
 #### Exp 16b — Qwen3.5-4B (2026-06-24)
 
@@ -626,8 +632,7 @@ Artefacts : `runs/exp16_single_turn_reasoning/plans/`,
 | Wall time replay | ~381 s |
 
 Backend HF `generate()` (`--backend hf --no-thinking`), vLLM non supporté pour
-Qwen3.5. Artefacts : `runs/exp16_qwen35_4b/plans/`,
-`runs/exp16_qwen35_4b/replay_logs/`.
+Qwen3.5. Artefacts : `runs/8_single_turn_exp16/core/exp16_qwen35_4b/{plans,replay_logs}/`.
 
 #### Comparaison oracle vs multi-tour (même modèle Qwen3.5-4B)
 
@@ -688,7 +693,7 @@ boucle** (répétition ad infinitum à basse température) — échecs légitime
 
 **(b) Balayage fin de température T=0.0→1.0 (pas 0.1) — image corrigée (2026-07-09).**
 Balayage complet en reasoning-pur informé, 1 tirage/T, sur base 3B et best58
-(11 T chacun) + Qwen3.5-4B partiel (T=0.0→0.6). Runs : `runs/exp16_sweep_{base,b58,4b}_t*`.
+(11 T chacun) + Qwen3.5-4B partiel (T=0.0→0.6). Runs : `runs/8_single_turn_exp16/sweep_{base,b58,4b}/`.
 
 | T | base 3B | best58 | 4B (partiel) |
 |---:|---:|---:|---:|
@@ -976,7 +981,7 @@ recette `textcraft_train.sh` avec les overrides 40 Go (`gpu_memory_utilization=0
 
 Protocole : N=20 trajectoires/item (T=1.0, ≤30 tours), pass@k non biaisé (Chen et al. 2021),
 global + par depth. pass@1 = fiable ; pass@20 = atteignable « avec oracle » (borne sup.
-optimiste). Script `src/eval/eval_oracle.py`. **Analyse détaillée : `runs/oracle_best32/ANALYSIS.md`.**
+optimiste). Script `src/eval/eval_oracle.py`. **Analyse détaillée : `runs/7_oracle/oracle_best32/ANALYSIS.md`.**
 
 **pass@k par depth — baseline Qwen2.5-3B vs best GRPO (checkpoint 32/100) :**
 | depth | items | base @1→@20 | best @1→@20 |
