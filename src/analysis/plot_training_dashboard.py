@@ -10,7 +10,7 @@ NB : exp10 (LoRA) est EXCLU — encore en entraînement, courbes non figées.
 
 Lecture SEULE des données d'expérience. Le script n'écrit QUE :
   - les PNG dans docs/dashboard/,
-  - runs/exp9_curriculum_depth_final/analysis.txt (via analyze_eval).
+  - runs/4_curriculum/exp9_curriculum_depth/analysis.txt (via analyze_eval).
 
 Axe des abscisses = EPOCH (et non step : grad_accum diffère entre runs) :
   - reward train : le champ 'epoch' de chaque step-dict TRL est utilisé directement ;
@@ -86,12 +86,12 @@ EXP = {
     "exp9": {
         "label": "exp9 curriculum depth",
         "log": LOGS / "exp9_curriculum_depth.log",
-        "eval_logs": RUNS_DIR / "exp9_curriculum_depth_final" / "eval_logs",
-        "run_dir": RUNS_DIR / "exp9_curriculum_depth_final",
+        "eval_logs": RUNS_DIR / "4_curriculum" / "exp9_curriculum_depth" / "eval_logs",
+        "run_dir": RUNS_DIR / "4_curriculum" / "exp9_curriculum_depth",
     },
     "exp7.3": {
         "label": "exp7.3 GRPO pur full-ft",
-        "eval_logs": RUNS_DIR / "exp7.3_ckpt400" / "eval_logs",
+        "eval_logs": RUNS_DIR / "2_grpo_fullft" / "exp7.3_ckpt400" / "eval_logs",
     },
 }
 

@@ -53,25 +53,25 @@ print('Download OK')
 run_model \
     "meta-llama/Llama-3.2-1B-Instruct" \
     "models/Llama-3.2-1B-Instruct" \
-    "exp11_llama1b_baseline" \
+    "0_baselines/exp11_llama1b_baseline" \
     "You are a helpful assistant."
 
 run_model \
     "HuggingFaceTB/SmolLM2-1.7B-Instruct" \
     "models/SmolLM2-1.7B-Instruct" \
-    "exp12_smollm2_baseline" \
+    "0_baselines/exp12_smollm2_baseline" \
     "You are a helpful AI assistant."
 
 run_model \
     "google/gemma-3-1b-it" \
     "models/Gemma-3-1B-it" \
-    "exp13_gemma3_baseline" \
+    "0_baselines/exp13_gemma3_baseline" \
     ""
 
 run_model \
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B" \
     "models/DeepSeek-R1-Distill-Qwen-1.5B" \
-    "exp14_deepseekr1_baseline" \
+    "0_baselines/exp14_deepseekr1_baseline" \
     "You are a helpful assistant."
 
 echo ""
@@ -80,7 +80,7 @@ echo "[benchmark] ALL DONE $(date -u)"
 echo "========================================"
 echo ""
 echo "Résultats :"
-for run in exp11_llama1b_baseline exp12_smollm2_baseline exp13_gemma3_baseline exp14_deepseekr1_baseline; do
+for run in 0_baselines/exp11_llama1b_baseline 0_baselines/exp12_smollm2_baseline 0_baselines/exp13_gemma3_baseline 0_baselines/exp14_deepseekr1_baseline; do
     n_success=$(grep -l '"reward": 1' "$REPO_ROOT/runs/$run/eval_logs/"*.json 2>/dev/null | wc -l)
     n_total=$(ls "$REPO_ROOT/runs/$run/eval_logs/"*.json 2>/dev/null | wc -l)
     echo "  $run : $n_success / $n_total"

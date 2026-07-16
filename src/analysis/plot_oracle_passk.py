@@ -3,7 +3,7 @@ Génère les 3 figures oracle pass@k superposées pour Qwen2.5-3B baseline,
 meilleur checkpoint RL (exp7.3) et Qwen3.5-4B.
 
 Usage :
-    python src/analysis/plot_oracle_passk.py runs/oracle_qwen35_4b --model-label "Qwen3.5-4B"
+    python src/analysis/plot_oracle_passk.py runs/7_oracle/oracle_qwen35_4b --model-label "Qwen3.5-4B"
 
 Sorties (dans le même dossier que passes.jsonl) :
     passk_curves.png       — courbes pass@k par depth (k=1..N)
@@ -27,13 +27,13 @@ DEPTH_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test_with_depth.json"
 # Modèles de référence à superposer automatiquement (oracle_passk.json précomputés)
 REFERENCE_MODELS = [
     {
-        "run_dir": REPO_ROOT / "runs" / "oracle_baseline",
+        "run_dir": REPO_ROOT / "runs" / "7_oracle" / "oracle_baseline",
         "label": "Qwen2.5-3B (base)",
         "color": "gray",
         "linestyle": "--",
     },
     {
-        "run_dir": REPO_ROOT / "runs" / "oracle_best32",
+        "run_dir": REPO_ROOT / "runs" / "7_oracle" / "oracle_best32",
         "label": "Qwen2.5-3B RL (best32)",
         "color": "tomato",
         "linestyle": "-.",

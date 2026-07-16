@@ -22,10 +22,10 @@ from analyze_eval import (  # noqa: E402
 
 # (label, run dir) — ordonnés par capacité croissante
 RUNS = [
-    ("Qwen2.5-0.5B", "exp10_qwen0.5b_baseline"),
-    ("Qwen2.5-3B", "exp1_baseline"),
-    ("Qwen3.5-4B", "exp15_qwen35_4b"),
-    ("Gemini F3.5", "exp_gemini_gemini_3_5_flash"),
+    ("Qwen2.5-0.5B", "0_baselines/exp10_qwen0.5b_baseline"),
+    ("Qwen2.5-3B", "0_baselines/exp1_baseline"),
+    ("Qwen3.5-4B", "0_baselines/exp15_qwen35_4b"),
+    ("Gemini F3.5", "1_api/exp_gemini_gemini_3_5_flash"),
 ]
 ETYPES = [e[0] for e in ERROR_PATTERNS]
 DEPTHS = [1, 2, 3, 4]

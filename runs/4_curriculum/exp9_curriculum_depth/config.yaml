@@ -48,5 +48,16 @@ hypotheses:
     Si exp9 ≈ exp7, le curriculum de depth n'apporte rien — le problème depth 4
     est ailleurs (reward sparsity, context length, ou capacité du 3B).
 
-results: ~
-verdict: ~
+results:
+  pass_at_1: 14/100  # eval_logs/ + analysis.txt (ex-dossier runs/exp9_curriculum_depth_final, fusionné ici 2026-07-16)
+  note: >
+    Le run réel a été lancé via run_curriculum_staged.sh en 4 stages par depth
+    EXACT (d1×3ep, d2×4ep, d3×2ep, d3+4×1ep, warm-start entre stages), variante
+    du plan à 3 phases cumulatives décrit ci-dessus. Courbes par stage :
+    src/analysis/plot_training_dashboard.py (famille exp9).
+
+verdict: >
+  Régression vs baseline (14 < 18) : le curriculum par depth seul n'a pas aidé,
+  le mur depth>=3 tient. Cohérent avec le diagnostic oracle (7_oracle/oracle_best32) :
+  depth 3-4 = mur de capacité (pass@20 ≈ 0), aucun gradient GRPO à récolter,
+  quel que soit l'ordre de présentation des données.
