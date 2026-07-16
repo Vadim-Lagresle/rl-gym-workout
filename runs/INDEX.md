@@ -17,6 +17,12 @@ Légende statut :
 | `exp7_b200_fullft` | actif/référence | TRL+vLLM B200 | Réplication recette papier, full FT |
 | `exp7.1_b200_fullft_12ep` | actif/référence | TRL+vLLM B200 | Continuation exp7 → 12 epochs |
 | `exp10_qwen0.5b_baseline` | actif/référence | TRL+vLLM | Itération rapide petit modèle (0.5B) |
+| `exp10.5_resume35_lr_div1.5` | actif/référence | TRL+vLLM B200 | Reprise LoRA depuis 35% (exp10.3), LR/1.5 → **best 51/100** (step 368), puis collapse |
+| `exp10.6_resume35_lr2.2e-6` | legacy | TRL+vLLM B200 | Variante LR 2.2e-6 depuis 35% — **abandonné step ~42** au profit du warm-start |
+| `exp10.7_warmstart51` | actif/référence | TRL+vLLM B200 | Warm-start depuis 51% (merge exp10.5) → **best 53/100** (step 92), interrompu step 163 |
+| `exp10.8_warmstart53_lr_div3` | actif/référence | TRL+vLLM B200 | Warm-start depuis 53% (merge exp10.7), LR/3 (7.33e-7) → best step 368 : **58/100 (pic éval train), 54/100 (re-éval indépendante)**, run complet 400 steps |
+| `exp16_blind_extraction_3b` | actif/référence | vLLM (replay --blind) | Ablation extracteur aveugle exp16 3B → **12/100** (vs 20 informé) |
+| `exp16_blind_extraction_4b` | actif/référence | HF (replay --blind) | Ablation extracteur aveugle exp16 4B → **46/100** (vs 54 informé) |
 | `exp_gemini_gemini_3_5_flash` | actif/référence | API Gemini (eval_gemini.py) | Borne haute SOTA (API externe) |
 | `exp7.1_ckpt1269` | checkpoint | TRL+vLLM | Eval intermédiaire (step 1269) — voir exp7.1_b200_fullft_12ep |
 | `exp7.1_ckpt1598` | checkpoint | TRL+vLLM | Eval intermédiaire (step 1598) |

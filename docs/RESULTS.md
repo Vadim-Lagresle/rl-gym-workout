@@ -666,6 +666,79 @@ sans erreur de parsing inter-tours. Pourtant **54/100 < 77/100**.
 `replay_logs/` (notamment les 46 items où Qwen3.5 multitour réussit mais oracle
 échoue).
 
+#### Exp 16 — addendum audit & température (2026-07-08)
+
+Audit complet du pipeline single-turn (détails : `docs/hebdo/10juillet/`). Trois
+corrections/ajouts qui changent la lecture des scores 20 et 54 ci-dessus.
+
+**(a) L'extracteur JSON est un solveur partiel — ablation « aveugle ».**
+Le prompt d'extraction voit recettes + goal et peut *compléter/réparer* le plan.
+En le privant de recettes+goal (traduction littérale, flag `--blind`) :
+
+| Modèle | Extracteur informé | Extracteur aveugle | part « réparation » |
+|---|---:|---:|---:|
+| Qwen2.5-3B | 20 / 100 | **12 / 100** | 40 % du score |
+| Qwen3.5-4B | 54 / 100 | **46 / 100** | 15 % du score |
+
+→ « reasoning pur » réel encadré : 3B ∈ [12, 20], 4B ∈ [46, 54]. Le 4B dépend
+bien moins de l'extracteur (plans auto-suffisants) → argument fort qu'il *planifie*
+mieux, pas seulement qu'il score mieux. Les « erreurs d'extraction » (11 pour le
+3B) ne sont **pas** de la troncature récupérable mais de la **dégénérescence en
+boucle** (répétition ad infinitum à basse température) — échecs légitimes.
+
+**(b) Balayage fin de température T=0.0→1.0 (pas 0.1) — image corrigée (2026-07-09).**
+Balayage complet en reasoning-pur informé, 1 tirage/T, sur base 3B et best58
+(11 T chacun) + Qwen3.5-4B partiel (T=0.0→0.6). Runs : `runs/exp16_sweep_{base,b58,4b}_t*`.
+
+| T | base 3B | best58 | 4B (partiel) |
+|---:|---:|---:|---:|
+| 0.0 | 11 | 21 | 56 |
+| 0.1 | 15 | 15 | 54 |
+| 0.2 | 15 | 18 | 54 |
+| 0.3 | 11 | 24 | 52 |
+| 0.4 | 11 | 18 | 52 |
+| 0.5 | 14 | 24 | 52 |
+| 0.6 | 11 | 18 | 57 |
+| 0.7 | 10 | 21 | — |
+| 0.8 | 13 | 18 | — |
+| 0.9 | 14 | 20 | — |
+| 1.0 | 10 | 17 | — |
+| **moy** | **12.3** | **19.5** | **53.9** (T≤0.6) |
+| σ / min-max | 1.9 / 10-15 | 2.7 / 15-24 | 1.9 / 52-57 |
+
+**Ce balayage corrige DEUX conclusions précédentes tirées de points isolés :**
+
+- **⚠️ Correction 1 — pas d'effet de température détectable (invalide l'ancien « −5/−6 »).**
+  Chaque modèle reste dans une **bande de bruit plate** de 0 à 1 (base 10-15, best58
+  15-24, 4B 52-57), sans tendance. Le greedy (T=0) n'est ni meilleur ni pire. La
+  « pénalité −5/−6 de 0.7→1.0 » annoncée précédemment venait de comparer **deux
+  tirages isolés bruités** (ex. base 0.7=20 était un tirage chanceux ; refait ici =10).
+  Meta-leçon : **un pass@1/100 en tirage unique a ~±5 de bruit run-à-run** — trop
+  pour résoudre un effet de 0,1 en température. (La déduplication « single-turn <
+  multi-tour » reste vraie, mais pas via un argument de température.)
+
+- **⚠️ Correction 2 — le RL A transféré à la planification (invalide l'ancien « 19≈20 »).**
+  best58 (moy **19.5**) bat la base (moy **12.3**) à **10 configs sur 11**
+  (1 égalité, 0 défaite), écart moyen **+7.2**, **test des signes p=0.002**.
+  L'ancien « 19 ≈ base 20, aucun transfert » comparait un tirage haut de la base
+  (20) à un tirage bas de best58 (19). Sur 11 tirages la vérité est robuste :
+  **le GRPO a bien amélioré la planification one-shot (+7 pts)**.
+
+**(c) Nuance : transfert réel mais modeste — le gain RL reste surtout réactif.**
+best58 : **+7** en reasoning-pur single-turn (12→19) contre **+36** en multi-tour
+(18→54). Le GRPO outcome-only améliore un peu la planification a priori, mais
+l'essentiel du gain est dans la **politique réactive** (agir → observer l'erreur →
+corriger). Pour franchir depth 3-4, injecter la planification explicitement
+(CoT tour 1, SFT sur plans, distillation) reste pertinent.
+
+> **Biais de sélection sur le best** : le « 58/100 » d'exp10.8 (step 368) est un
+> pic isolé d'une courbe d'éval mono-tirage bruitée (steps voisins : 40, 49, 58,
+> 49). Re-évaluation indépendante = **54/100**. Le vrai niveau du checkpoint est
+> dans les bas-50 ; le 58 était du bruit capté vers le haut (*winner's curse*).
+> Même cause que la Correction 1 : le bruit mono-tirage sur 100 items (~±5)
+> fausse toute lecture d'un point unique — best sélectionné, comparaison de T,
+> ou comparaison de deux modèles proches. Remède : multi-seed / pass@k.
+
 ---
 
 ### Tableau récapitulatif

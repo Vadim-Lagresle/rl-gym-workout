@@ -62,7 +62,12 @@ def generate_reply_vllm(
     }
     r = requests.post(f"{vllm_url}/v1/chat/completions", json=payload, timeout=180)
     r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"]
+    choice = r.json()["choices"][0]
+    if choice.get("finish_reason") not in (None, "stop"):
+        # ex. "length" = coupé au max_tokens → JSON/plan probablement tronqué
+        print(f"[llm][WARN] finish_reason={choice.get('finish_reason')!r} "
+              f"(réponse probablement tronquée à max_tokens={max_tokens})", flush=True)
+    return choice["message"]["content"]
 
 
 def generate_reply_hf(
@@ -98,6 +103,9 @@ def generate_reply_hf(
     with torch.no_grad():
         output_ids = model.generate(**inputs, **gen_kwargs)
     new_tokens = output_ids[0, inputs["input_ids"].shape[1] :]
+    if new_tokens.shape[0] >= max_new_tokens:
+        print(f"[llm][WARN] génération HF au cap max_new_tokens={max_new_tokens} "
+              f"(réponse probablement tronquée)", flush=True)
     return tokenizer.decode(new_tokens, skip_special_tokens=True)
 
 

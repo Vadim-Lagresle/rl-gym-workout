@@ -1093,11 +1093,24 @@ def main() -> None:
                     tmp = self.best_dir + ".tmp"
                     try:
                         shutil.rmtree(tmp, ignore_errors=True)
-                        # Modèle HF COMPLET (full-ft: direct ; LoRA: merge adapter->base) pour
-                        # que le _best soit re-servable tel quel (start_vllm_server.sh attend un
-                        # modèle complet, pas un adapter). Même helper que la sauvegarde finale.
                         unwrapped = self.trainer_ref.accelerator.unwrap_model(self.trainer_ref.model)
-                        _save_model_for_vllm(unwrapped, tmp)
+                        # LoRA : on ne sauve QUE l'adapter PEFT (adapter_model.safetensors +
+                        # adapter_config.json, ~qq dizaines de Mo) au lieu du modèle fusionné
+                        # complet (~5.8 Go) qui saturait le disque (cf. exp10.3). Le best =
+                        # modèle de base 35% + cet adapter, à fusionner plus tard (merge_and_unload)
+                        # pour l'éval offline. NB : l'éval en cours de run tourne sur le moteur
+                        # vLLM in-process (poids déjà synchronisés), PAS sur ce dossier -> sauver
+                        # l'adapter seul n'impacte pas run_test_eval.
+                        # Full-ft : on garde le modèle complet (_save_model_for_vllm).
+                        is_peft = (hasattr(unwrapped, "merge_adapter")
+                                   and hasattr(unwrapped, "unmerge_adapter"))
+                        if is_peft:
+                            unwrapped.save_pretrained(tmp)  # adapter-only
+                            print(f"[test_eval] (LoRA) adapter-only save -> {tmp} "
+                                  f"(adapter_model.safetensors + adapter_config.json, PAS de merge)",
+                                  flush=True)
+                        else:
+                            _save_model_for_vllm(unwrapped, tmp)  # full-ft: modèle complet
                         self.trainer_ref.processing_class.save_pretrained(tmp)
                         with open(os.path.join(tmp, ".best_info"), "w") as f:
                             f.write(f"step={state.global_step} pass_at_1={score:.4f}\n")

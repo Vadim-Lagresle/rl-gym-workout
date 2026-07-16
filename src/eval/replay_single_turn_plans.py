@@ -76,6 +76,29 @@ Rules:
 - include every step needed to reach the goal, in order
 - output JSON only"""
 
+# Variante "aveugle" (ablation) : ni recettes ni goal → l'extracteur ne peut pas
+# compléter un plan incomplet ni corriger un plan faux. Il traduit, c'est tout.
+BLIND_EXTRACT_USER_TEMPLATE = """Convert this crafting plan into an ordered list of TextCraft actions.
+
+Plan:
+{plan}
+
+Output JSON with this exact schema:
+{{
+  "actions": [
+    {{"type": "get", "count": 9, "item": "lapis lazuli"}},
+    {{"type": "craft", "count": 1, "item": "lapis block", "using": [{{"count": 9, "item": "lapis lazuli"}}]}}
+  ]
+}}
+
+Rules:
+- type is one of: get, craft, inventory
+- get: fetch base items from the environment
+- craft: item = target; using = list of ingredients with counts
+- translate ONLY the steps explicitly written in the plan — do NOT add, remove, reorder or fix any step
+- item names: use the exact item wording from the plan (plain words, no ids)
+- output JSON only"""
+
 
 @dataclass
 class ReplayResult:
@@ -106,30 +129,47 @@ def extract_actions(
     recipes: str,
     goal: str,
     plan: str,
+    max_tokens: int = 2048,
+    blind: bool = False,
 ) -> tuple[list[dict], str]:
+    if blind:
+        # Ablation "extracteur aveugle" : pas de recettes ni de goal → l'extracteur
+        # ne peut pas compléter/réparer le plan, il le traduit littéralement.
+        user_content = BLIND_EXTRACT_USER_TEMPLATE.format(plan=plan)
+    else:
+        user_content = EXTRACT_USER_TEMPLATE.format(
+            recipes=recipes, goal=goal, plan=plan
+        )
     messages = [
         {"role": "system", "content": EXTRACT_SYSTEM},
-        {
-            "role": "user",
-            "content": EXTRACT_USER_TEMPLATE.format(
-                recipes=recipes, goal=goal, plan=plan
-            ),
-        },
+        {"role": "user", "content": user_content},
     ]
-    raw = llm.generate(messages, max_tokens=1024, temperature=0.0)
-    data = parse_json_from_llm(raw)
-    actions = data.get("actions")
-    if not isinstance(actions, list) or not actions:
-        raise ValueError(f"invalid actions list in JSON: {data!r}")
+    raw = llm.generate(messages, max_tokens=max_tokens, temperature=0.0)
+    try:
+        data = parse_json_from_llm(raw)
+        actions = data.get("actions")
+        if not isinstance(actions, list) or not actions:
+            raise ValueError(f"invalid actions list in JSON: {data!r}")
+    except Exception as e:
+        e.raw = raw  # conservé pour le log d'échec (post-mortem sans relancer)
+        raise
     return actions, raw
 
 
 def parse_json_from_llm(text: str) -> dict:
+    """json.loads tolérant : bloc ```json``` si présent, sinon texte brut,
+    sinon rattrapage sur la sous-chaîne du 1er '{' au dernier '}'."""
     text = text.strip()
     fence = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
     if fence:
         text = fence.group(1).strip()
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            return json.loads(text[start : end + 1])
+        raise e
 
 
 def action_to_textcraft(cmd: dict) -> str:
@@ -198,6 +238,8 @@ def load_existing_replay(item_id: str, log_dir: Path) -> ReplayResult | None:
         required = {"item_id", "item_idx", "reward", "done"}
         if not required.issubset(d):
             return None
+        if d.get("error"):
+            return None  # les items en erreur sont retentés (pas mis en cache)
         return ReplayResult(
             item_id=d["item_id"],
             item_idx=int(d["item_idx"]),
@@ -244,6 +286,8 @@ def replay_one_plan(
     client: TextCraftEnvClient,
     plan_path: Path,
     depth: int | None,
+    extract_max_tokens: int = 2048,
+    blind: bool = False,
 ) -> ReplayResult:
     plan_data = load_plan(plan_path)
     item_id = plan_data["item_id"]
@@ -254,7 +298,10 @@ def replay_one_plan(
     t0 = time.time()
 
     try:
-        extracted, raw = extract_actions(llm, recipes, goal, plan)
+        extracted, raw = extract_actions(
+            llm, recipes, goal, plan,
+            max_tokens=extract_max_tokens, blind=blind,
+        )
         commands = [action_to_textcraft(a) for a in extracted]
         reward, done, step_log = replay_commands(client, item_idx, commands)
         return ReplayResult(
@@ -282,7 +329,8 @@ def replay_one_plan(
             n_steps_executed=0,
             extracted_actions=[],
             textcraft_commands=[],
-            extraction_raw="",
+            # raw attaché à l'exception par extract_actions → post-mortem possible
+            extraction_raw=getattr(e, "raw", ""),
             duration_s=time.time() - t0,
             error=str(e),
         )
@@ -333,6 +381,12 @@ def main() -> None:
     parser.add_argument("--vllm-url", type=str, default=VLLM_SERVER_URL)
     parser.add_argument("--no-thinking", action="store_true",
                         help="Qwen3/3.5 : enable_thinking=False")
+    parser.add_argument("--extract-max-tokens", type=int, default=2048,
+                        help="Budget tokens de l'appel d'extraction JSON "
+                             "(1024 tronquait ~8%% des items, cf. audit 08/07)")
+    parser.add_argument("--blind", action="store_true",
+                        help="Ablation : extracteur SANS recettes ni goal "
+                             "(traduction littérale du plan, pas de réparation)")
     args = parser.parse_args()
 
     plans_dir = args.plans_dir
@@ -383,7 +437,10 @@ def main() -> None:
         plan_data = load_plan(pf)
         item_id = plan_data["item_id"]
         depth = plan_data.get("depth") or depth_map.get(item_id)
-        result = replay_one_plan(llm, client, pf, depth=depth)
+        result = replay_one_plan(
+            llm, client, pf, depth=depth,
+            extract_max_tokens=args.extract_max_tokens, blind=args.blind,
+        )
         write_replay_log(result, log_dir, pf)
         status = "OK" if result.reward >= 1.0 else ("ERR" if result.error else "FAIL")
         depth_str = f"d{depth}" if depth is not None else "d?"

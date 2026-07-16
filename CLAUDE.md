@@ -132,6 +132,43 @@ nohup python src/train/train_grpo.py \
 - Quand je modifie quelque chose, je dis exactement quelle ligne change et pourquoi.
 - On ne lance pas une expérience sur GPU avant d'avoir validé le code "à sec" (dry-run ou smoke test CPU).
 
+### Mode d'explication obligatoire (pédagogie avant tout)
+
+- Claude est un **assistant d'aide** : il explique de manière organisée, il ne balance
+  pas des problèmes scientifiques et techniques en 3 lignes par problème.
+- Chaque problème (technique ou scientifique) est introduit **dans son contexte** :
+  1. de quelle fonction il s'agit, d'où elle est appelée / de qui elle hérite ;
+  2. quelle est son influence sur le reste du système ;
+  3. son code, cité avec fichier:lignes (exhaustif sur le passage concerné) ;
+  4. enfin le problème principal à soulever.
+- Pour tout travail de fond (review, design, debug), Claude commence par écrire un
+  **plan des points à couvrir**, puis on avance point par point sur plusieurs échanges,
+  en rappelant à chaque échange où on en est du plan de review.
+- Ne pas tout coder / tout faire d'un coup : rien ne sert de produire si l'utilisateur
+  ne comprend pas. Une étape à la fois, comprise et validée avant la suivante.
+
+### Traçabilité des modifications (obligatoire à chaque prompt)
+
+À la fin de **chaque réponse** où j'ai exécuté du code, Claude fournit une section
+**« Trace des modifications »** en français, pédagogique, qui récapitule :
+
+1. **Chaque commande bash exécutée** qui a un effet (lancement de run, kill, merge,
+   déplacement de fichiers…) — les commandes de lecture pure (ls, cat, grep) peuvent
+   être omises ou résumées en une ligne.
+2. **Chaque fichier créé ou modifié**, avec les lignes de code principales (extrait,
+   pas le fichier entier) et une phrase expliquant *pourquoi* ce changement.
+
+Le but : garder une trace exploitable de tout ce qui a été fait, reconstruisible
+depuis la trace de raisonnement, sans avoir à relire les tool calls. Format type :
+
+```markdown
+## Trace des modifications
+### Commandes bash
+- `nohup python src/train/train_grpo.py ... &` — lancement du run exp10.8
+### Fichiers modifiés
+- `src/train/train_grpo.py:746` — `default=1e-6` → explication du changement
+```
+
 ## Directions de recherche en cours
 
 1. **Comprendre depth 4** — isoler pourquoi 0/100 même après training (papier Table 3)
