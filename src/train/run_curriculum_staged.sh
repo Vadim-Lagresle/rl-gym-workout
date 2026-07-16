@@ -61,4 +61,4 @@ rm -rf "${SAVES_ROOT}/${S3}"
 
 echo "=== Curriculum terminé. Checkpoint final : ${SAVES_ROOT}/${S4} ==="
 echo "Eval : bash src/utils/start_vllm_server.sh ${SAVES_ROOT}/${S4} && \\"
-echo "       python src/eval/eval_vllm.py --model ${SAVES_ROOT}/${S4} --run-name ${RUN_NAME}_final"
+echo "       python src/eval/eval_textcraft.py --model ${SAVES_ROOT}/${S4} --run-name 4_curriculum/${RUN_NAME}_final"

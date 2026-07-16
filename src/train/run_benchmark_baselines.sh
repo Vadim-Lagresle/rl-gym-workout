@@ -34,7 +34,7 @@ print('Download OK')
     echo "[benchmark] Démarrage serveur vLLM ($(date -u))"
     bash "$REPO_ROOT/src/utils/start_vllm_server.sh" "$REPO_ROOT/$local_dir"
     echo "[benchmark] Eval baseline $run_name ($(date -u))"
-    "$PYTHON" "$REPO_ROOT/src/eval/eval_vllm.py" \
+    "$PYTHON" "$REPO_ROOT/src/eval/eval_textcraft.py" \
         --model "$REPO_ROOT/$local_dir" \
         --run-name "$run_name" \
         --system-prompt "$system_prompt"
