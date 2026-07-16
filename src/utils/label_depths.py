@@ -6,11 +6,13 @@ Génère les mappings {item_id: depth} des datasets TextCraft :
 Utilise la même logique que TextCraftEnv.reset() : items triés par profondeur
 de recette minimale via CraftingTree.item_recipes_min_depth(1).
 
-Pré-requis (le package agentenv_textcraft n'existe que dans cet env) :
+Pré-requis (le package agentenv_textcraft n'existe que dans cet env, et son
+import instancie un CraftingTree avec le chemin RELATIF 'agentenv_textcraft/recipes/'
+→ lancer OBLIGATOIREMENT depuis le dossier du package, comme le serveur) :
     source ~/envs/agentenv-textcraft/bin/activate
-    python src/utils/label_depths.py                 # les deux splits
-    python src/utils/label_depths.py --split train   # train seul
-    python src/utils/label_depths.py --split test    # test seul
+    cd external/AgentGym/agentenv-textcraft
+    python /chemin/absolu/src/utils/label_depths.py                 # les deux splits
+    python /chemin/absolu/src/utils/label_depths.py --split test    # test seul
 
 (Fusion de l'ancien label_depths_test.py — archive/utils/ — 2026-07-16.)
 """
