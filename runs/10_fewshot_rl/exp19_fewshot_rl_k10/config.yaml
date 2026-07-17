@@ -1,0 +1,75 @@
+name: exp19_fewshot_rl_k10
+date: 2026-07-17
+description: >
+  Quantifier l'apport du few-shot AU RL : GRPO + LoRA depuis le Qwen2.5-3B de
+  base, avec k=10 exemples résolus (recettes hors train/test, format dialogue,
+  cf. exp18) injectés dans le prompt de CHAQUE rollout d'entraînement ET de
+  l'éval périodique. Relance « de zéro » de la recette de la lignée best58
+  (exp10.5→10.7→10.8, LR décroissant) : on reprend le PLUS PETIT LR de la
+  lignée (7.333e-7, celui d'exp10.8) et 10× ses steps (400 → 4000) pour un
+  run continu sur le weekend. Objectif : dépasser 58.
+
+algorithm: GRPO (TRL + vLLM in-process), LoRA r=16/α=32, few-shot k=10 dans le prompt
+model: models/Qwen2.5-3B-Instruct   # depuis la base — la lignée best58 n'est plus reconstructible
+script: src/train/train_grpo.py --fewshot 10
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+wandb: (rempli au lancement — run exp19_fewshot_rl_k10, projet rl-gym-workout)
+
+training:
+  fine_tuning: LoRA (pas de --full-ft)
+  optimizer: adamw_torch
+  num_generations: 8
+  gradient_accumulation_steps: 64   # 8 prompts × 8 gens = 64 trajectoires/step
+  max_completion_length: 512
+  max_steps: 4000                   # 10× exp10.8 ; ~85 epochs (374 items / 8 prompts/step ≈ 47 steps/epoch)
+  learning_rate: 7.333e-7           # le plus petit de la lignée best58 (exp10.8)
+  beta_kl: 0.01                     # recommandé LoRA (anti runaway-KL, cf. exp10)
+  fewshot: 10                       # exemples held-out, format dialogue, FIXES sur tout le run
+  vllm_max_len: 20480               # +2.8k tokens de prompt (exemples) → marge éval 30 tours
+  eval_every: 50                    # ~80 évals ; best adapter sauvé sur le HOME (persistant)
+  eval_items: 100
+  save_steps: 47                    # ~1 checkpoint resumable par epoch, sur /tmp (overlay)
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs   # checkpoints périodiques (volatils, resumables)
+
+command: >
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --max-steps 4000 --learning-rate 7.333e-7 --beta 0.01
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp19_fewshot_rl_k10
+    > logs/exp19_fewshot_rl_k10.log 2>&1 &
+
+reprise_apres_coupure: >
+  Les checkpoints complets (adapter + optimizer) sont sur /tmp/trl_grpo_runs/
+  exp19_fewshot_rl_k10/checkpoint-N (1/epoch, 20 conservés). Relancer la MÊME
+  commande + --resume-from-checkpoint <dernier checkpoint> --best-init-score
+  <meilleur pass@1 vu / 100>. Si /tmp a été purgé : le best adapter (home,
+  saves/trl_grpo/exp19_fewshot_rl_k10_best) permet un warm-start (merge puis
+  nouveau run), comme la lignée exp10.
+
+references_pour_lecture:
+  base_zero_shot: 18/100
+  base_fewshot_k10_sans_RL: 30/100  # exp18 — LE point de départ réel de ce run
+  base_fewshot_pass10_k5: "60% (d3 8%)"   # exp18b — la marge que le RL doit convertir
+  lignee_best58_sans_fewshot: 54/100 (re-éval ; 58 = pic bruité)
+  objectif: "> 58"
+
+hypotheses:
+  H1: >
+    Le few-shot relève le taux de trajectoires à reward > 0 dès le step 1
+    (pass@1 ~30 au lieu de 18, pass@10 60) → GRPO reçoit ~2-3× plus de signal
+    par batch, dont du signal depth-3 inédit (pass@10 d3 : 0 → 8-16 %).
+    À LR égal, la fiabilisation devrait dépasser la lignée exp10.
+  H2: >
+    Si le run plafonne vers ~54-58 comme la lignée sans few-shot, l'apport du
+    prompt et celui du RL sont redondants (ils fiabilisent les mêmes items
+    d1-d2) plutôt qu'additifs.
+
+results: ~
+verdict: ~

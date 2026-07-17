@@ -161,6 +161,21 @@ def build_parser() -> argparse.ArgumentParser:
             "to resume training state from. Empty = fresh run."
         ),
     )
+    parser.add_argument("--fewshot", type=int, default=0,
+                        help="Nb d'exemples résolus (recettes hors train/test, exp18/19) injectés "
+                             "dans le prompt de CHAQUE rollout ET de l'éval périodique. 0 = zero-shot.")
+    parser.add_argument("--fewshot-file", type=str,
+                        default=str(REPO_ROOT / "data" / "eval" / "textcraft_fewshot_examples.json"))
+    parser.add_argument("--fewshot-format", choices=["dialogue", "bloc"], default="dialogue",
+                        help="dialogue = tours user/assistant (recommandé, cf. exp18)")
+    parser.add_argument("--vllm-max-len", type=int, default=16384,
+                        help="max_model_len du moteur vLLM in-process (monter à ~20480 avec "
+                             "--fewshot >= 10 : les exemples ajoutent ~2-5k tokens au contexte)")
+    parser.add_argument("--output-root", type=str, default="",
+                        help="Racine des checkpoints périodiques (défaut : saves/trl_grpo, disque home). "
+                             "Ex. /tmp/trl_grpo_runs pour garder les checkpoints resumables sur l'overlay "
+                             "sans saturer le home — le best adapter reste TOUJOURS sur le home "
+                             "(saves/trl_grpo/<run>_best, via le callback d'éval).")
     return parser
 
 
@@ -190,12 +205,20 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
             schedules.parse_max_rounds_schedule_epochs(args.max_rounds_schedule_epochs)
         print(f"[scaling-inter] schedule (epoch-based) = {schedules.MAX_ROUNDS_SCHEDULE_EPOCHS}", flush=True)
 
+    fewshot_block, fewshot_messages = (None, None)
+    if args.fewshot > 0:
+        from src.eval.textcraft_common import load_fewshot
+        fewshot_block, fewshot_messages = load_fewshot(
+            args.fewshot_file, args.fewshot, args.fewshot_format)
+        print(f"[fewshot] k={args.fewshot} exemples ({args.fewshot_format}) injectés dans "
+              f"chaque rollout + éval périodique ({len(fewshot_messages or [])} tours)", flush=True)
+
     model_path = Path(args.model_path) if args.model_path else DEFAULT_MODEL_PATH
     if not model_path.is_absolute():
         model_path = REPO_ROOT / model_path
 
     if args.use_vllm_inprocess:
-        vllm_engine.init_engine(str(model_path))
+        vllm_engine.init_engine(str(model_path), max_model_len=args.vllm_max_len)
 
     print(f"[train] Model: {model_path}", flush=True)
 
@@ -212,14 +235,16 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         flush=True,
     )
     rows = build_prompt_rows(max_items=args.max_items, max_depth=args.max_depth,
-                             system_prompt=args.system_prompt, depth_in=depth_in)
+                             system_prompt=args.system_prompt, depth_in=depth_in,
+                             fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
     dataset = Dataset.from_list(rows)
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    out_dir = REPO_ROOT / "saves" / "trl_grpo" / args.run_name
+    out_root = Path(args.output_root) if args.output_root else REPO_ROOT / "saves" / "trl_grpo"
+    out_dir = out_root / args.run_name
     out_dir.mkdir(parents=True, exist_ok=True)
 
     os.environ.setdefault("WANDB_PROJECT", "rl-gym-workout")
@@ -315,7 +340,8 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
             raise SystemExit("--eval-every nécessite --use-vllm-inprocess (le moteur vLLM sert aussi à l'éval)")
         # Enregistré APRÈS VllmSyncCallback : à on_step_end le moteur a les poids du step.
         test_eval_cb = TestEvalCallback(eval_every=args.eval_every, eval_items=args.eval_items,
-                                        best_init_score=args.best_init_score, run_name=args.run_name)
+                                        best_init_score=args.best_init_score, run_name=args.run_name,
+                                        fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
         callbacks.append(test_eval_cb)
         print(f"[test_eval] Éval test set tous les {args.eval_every} steps "
               f"({args.eval_items or 'tous les'} items).", flush=True)

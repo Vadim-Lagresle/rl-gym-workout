@@ -27,6 +27,8 @@ from agentenv.envs import TextCraftEnvClient
 # Source UNIQUE de la taxonomie d'erreurs : classify_error d'analyze_eval
 # (src/analysis) plutôt qu'une copie des patterns (éviter toute dérive).
 from src.analysis.analyze_eval import classify_error, ERROR_PATTERNS
+# Bootstrap de messages partagé avec l'éval offline (règles + ack + obs, few-shot inclus).
+from src.eval.textcraft_common import build_initial_messages
 from src.train import vllm_engine
 from src.train.data import DEFAULT_SYSTEM_PROMPT, ENV_SERVER_URL, REPO_ROOT, item_id_to_idx
 
@@ -36,7 +38,9 @@ EVAL_MAX_ROUNDS = 30  # protocole d'éval, distinct de schedules.MAX_SIM_ROUNDS=
 
 
 def run_test_eval(tokenizer: Any, max_items: int = 0,
-                  temperature: float = 1.0, max_tokens: int = 512) -> dict[str, float]:
+                  temperature: float = 1.0, max_tokens: int = 512,
+                  fewshot_block: str | None = None,
+                  fewshot_messages: list[dict] | None = None) -> dict[str, float]:
     """Pass@1 sur le test set via le moteur vLLM in-process (poids du step courant).
 
     Retourne les métriques globales + par depth + par type d'erreur (préfixées
@@ -65,12 +69,11 @@ def run_test_eval(tokenizer: Any, max_items: int = 0,
     for it in items:
         client = TextCraftEnvClient(env_server_base=ENV_SERVER_URL, data_len=10000, timeout=60)
         client.reset(item_id_to_idx(it["item_id"]))
-        states.append([
-            {"role": "system", "content": DEFAULT_SYSTEM_PROMPT},
-            {"role": "user", "content": client.conversation_start[0]["value"]},
-            {"role": "assistant", "content": client.conversation_start[1]["value"]},
-            {"role": "user", "content": client.observe()},
-        ])
+        states.append(build_initial_messages(
+            client, system_prompt=DEFAULT_SYSTEM_PROMPT,
+            fewshot_block=fewshot_block,
+            fewshot_messages=list(fewshot_messages) if fewshot_messages else None,
+        ))
         clients.append(client)
 
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=temperature, top_p=1.0)
@@ -146,11 +149,15 @@ class TestEvalCallback(TrainerCallback):
     """
 
     def __init__(self, eval_every: int, eval_items: int, best_init_score: float,
-                 run_name: str) -> None:
+                 run_name: str, fewshot_block: str | None = None,
+                 fewshot_messages: list[dict] | None = None) -> None:
         self.eval_every = eval_every
         self.eval_items = eval_items
         self.best_score = best_init_score  # -1 => le 1er eval sauve toujours
+        # Best TOUJOURS sur le disque home persistant, quel que soit --output-root.
         self.best_dir = str(REPO_ROOT / "saves" / "trl_grpo" / f"{run_name}_best")
+        self.fewshot_block = fewshot_block
+        self.fewshot_messages = fewshot_messages
         self.trainer_ref: Any = None  # injecté après la création du GRPOTrainer
 
     def on_step_end(self, targs: Any, state: Any, control: Any, **kwargs: Any) -> None:
@@ -159,7 +166,9 @@ class TestEvalCallback(TrainerCallback):
         t0 = time.time()
         print(f"[test_eval] step {state.global_step} — éval test set en cours...", flush=True)
         try:
-            metrics = run_test_eval(self.trainer_ref.processing_class, max_items=self.eval_items)
+            metrics = run_test_eval(self.trainer_ref.processing_class, max_items=self.eval_items,
+                                    fewshot_block=self.fewshot_block,
+                                    fewshot_messages=self.fewshot_messages)
         except Exception as e:
             # Télémétrie pure : un échec d'éval ne doit pas tuer le run — mais il
             # doit être impossible à rater dans le log (leçon du sync silencieux).

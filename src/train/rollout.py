@@ -80,15 +80,17 @@ def collect_episodes(prompts: list[list[dict[str, str]]], trainer: Any) -> list[
     env_clients: list[TextCraftEnvClient] = []
 
     # Bootstrap : un client env par épisode, l'idx est encodé dans le marqueur
-    # <ITEM_IDX:n> du dernier message user (remplacé par l'observation initiale).
+    # <ITEM_IDX:n> du dernier message user. Le marqueur (et lui seul) est remplacé
+    # par l'observation initiale — le reste du message (ex. observation finale du
+    # dernier exemple few-shot, exp19) est préservé.
     for i in range(n):
-        marker = str(states[i][-1]["content"]).strip()
-        m = ITEM_TAG_RE.match(marker)
+        content = str(states[i][-1]["content"])
+        m = ITEM_TAG_RE.search(content)
         if m is None:
-            raise ValueError(f"Missing item marker in prompt[{i}] last user message: {marker!r}")
+            raise ValueError(f"Missing item marker in prompt[{i}] last user message: {content!r}")
         env = TextCraftEnvClient(env_server_base=ENV_SERVER_URL, data_len=10000, timeout=60)
         env.reset(int(m.group(1)))
-        states[i][-1]["content"] = env.observe()
+        states[i][-1]["content"] = content.replace(m.group(0), env.observe()).strip()
         env_clients.append(env)
 
     cap = current_max_rounds(trainer)

@@ -25,9 +25,11 @@ ENV_SERVER_URL = "http://127.0.0.1:36005"
 
 DEFAULT_SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
-# Marqueur caché inséré comme dernier message user du prompt : il encode l'index
+# Marqueur caché inséré dans le dernier message user du prompt : il encode l'index
 # de l'item pour la rollout_func (qui le remplace par l'observation env réelle).
-ITEM_TAG_RE = re.compile(r"^<ITEM_IDX:(\d+)>$")
+# Non ancré : avec le few-shot (exp19), le marqueur cohabite dans le même message
+# avec l'observation finale du dernier exemple.
+ITEM_TAG_RE = re.compile(r"<ITEM_IDX:(\d+)>")
 
 
 def item_id_to_idx(item_id: str) -> int:
@@ -41,13 +43,21 @@ def check_server() -> None:
 
 
 def build_prompt_rows(max_items: int, max_depth: int = 0, system_prompt: str = DEFAULT_SYSTEM_PROMPT,
-                      depth_in: set[int] | None = None) -> list[dict[str, Any]]:
+                      depth_in: set[int] | None = None,
+                      fewshot_block: str | None = None,
+                      fewshot_messages: list[dict] | None = None) -> list[dict[str, Any]]:
     """Build the list of prompt rows for rollout_func, optionally filtering by depth and max_items.
 
     Deux modes de filtrage par depth (exclusifs) :
       - max_depth > 0   : garde les items de depth <= max_depth (curriculum cumulatif).
       - depth_in donné  : garde uniquement les items dont depth ∈ depth_in (curriculum par
-                          stage, ex. {1} ou {3, 4}). Utilisé par run_curriculum_staged.sh."""
+                          stage, ex. {1} ou {3, 4}). Utilisé par run_curriculum_staged.sh.
+
+    Few-shot (exp19) : fewshot_block est ajouté à la fin du message de règles,
+    fewshot_messages (tours user/assistant, cf. textcraft_common.load_fewshot) est
+    inséré entre l'ack et le marqueur ; l'observation finale du dernier exemple est
+    fusionnée avec le message porteur du marqueur <ITEM_IDX:n> (pas de tours user
+    consécutifs). Les tokens des exemples sont dans prompt_ids → jamais de gradient."""
 
     with TRAIN_PATH.open() as f:
         rows = json.load(f)
@@ -81,15 +91,26 @@ def build_prompt_rows(max_items: int, max_depth: int = 0, system_prompt: str = D
 
     # Assemblage des prompts. Si system_prompt est vide (ex. Gemma-3 qui refuse
     # le rôle system), on démarre directement sur le message user.
+    rules_msg = manual_human + ("\n\n" + fewshot_block if fewshot_block else "")
+    example_turns: list[dict] = []
+    carry = None
+    if fewshot_messages:
+        example_turns = list(fewshot_messages)
+        if example_turns and example_turns[-1]["role"] == "user":
+            carry = example_turns.pop()["content"]
+
     out: list[dict[str, Any]] = []
     for r in rows:
         item_id = r["item_id"]
         idx = item_id_to_idx(item_id)
+        marker = (f"{carry}\n\nNow solve this new task:\n\n<ITEM_IDX:{idx}>"
+                  if carry else f"<ITEM_IDX:{idx}>")  # marqueur caché pour rollout_func
         base = [{"role": "system", "content": system_prompt}] if system_prompt else []
         prompt = base + [
-            {"role": "user", "content": manual_human},
+            {"role": "user", "content": rules_msg},
             {"role": "assistant", "content": manual_ack},
-            {"role": "user", "content": f"<ITEM_IDX:{idx}>"},  # marqueur caché pour rollout_func
+            *example_turns,
+            {"role": "user", "content": marker},
         ]
         out.append({"prompt": prompt, "item_id": item_id, "item_idx": idx})
 
