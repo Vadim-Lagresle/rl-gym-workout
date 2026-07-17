@@ -2119,3 +2119,41 @@ Détail complet : `docs/hebdo/19juin/session_2026-06-16.md`. Points durables :
      ≠ Dr. GRPO). Pour tester Dr. GRPO pur : `scale_rewards="none"` (ablation à 1 param,
      peu risquée, à ne pas mélanger avec la réplication verl en cours).
    Détail : `docs/hebdo/19juin/session_2026-06-16.md` §9.
+
+---
+
+## 2026-07-17 — exp19 lancé : GRPO LoRA + few-shot k=10, run du weekend (objectif > 58)
+
+Semaine dense — le détail vit dans `docs/hebdo/21juillet/` et `docs/RESULTS.md` §Exp18 :
+refacto complet du repo le 16/07 (familles `runs/0-10`, `src/train` en 8 modules,
+éval unifiée 2 backends — 9 commits, tout smoke-testé), puis exp18 (few-shot éval pure :
+18 → **31/100 @ k=5**, et pass@10 37.8 → **61 %** avec **d3 : 0 → 16 %** — le mur de
+capacité se fissure avec des exemples dans le prompt). ⚠️ Constat : le best58 n'est
+**plus reconstructible** (merge 35 % exp10.3 supprimé sans backup, adapters seuls
+conservés) → toujours sauvegarder les merges de best sur disque persistant.
+
+**exp19 (en cours, weekend)** — quantifier l'apport du few-shot AU RL :
+- GRPO TRL + LoRA depuis la base, **LR 7.333e-7** (le plus petit de la lignée
+  exp10.5→10.7→10.8), **4000 steps** (10× exp10.8), **k=10 exemples held-out dans le
+  prompt de chaque rollout ET de l'éval périodique** (50 steps, 100 items).
+- PID 431246 (nohup, PPID 1 — survit aux déconnexions), wandb `kmkuyf97`,
+  log `logs/exp19_fewshot_rl_k10.log`. Best adapter → `saves/trl_grpo/
+  exp19_fewshot_rl_k10_best` (HOME persistant) ; checkpoints resumables 1/epoch
+  → `/tmp/trl_grpo_runs/` (reprise documentée dans le config.yaml du run).
+- **Signal step 0 : 30/64 trajectoires à reward>0** (vs batches quasi muets en
+  zero-shot) — H1 (densification du signal GRPO par le prompt) confirmée d'entrée.
+- Repères : base+k10 sans RL = 30/100 (départ réel) ; lignée sans few-shot = 54 ;
+  objectif > 58.
+
+**Profil ressources mesuré (~50 min de run)** : 78 s/step → ETA ~3.6 j (fin ~lundi
+soir) ; GPU 40/183 GiB (22 %), utilisation en rafales ; CPU/RAM négligeables ;
+historique continu dans wandb (onglet System). **~20-25 % du step part dans la
+re-sync vLLM** (merge adapter → écriture 5.8 Go → recréation moteur). Pistes optim
+pour un PROCHAIN run LoRA (ne pas toucher à celui-ci) : (1) per_device_train_batch_size
+4-8 (bs=1 dimensionné pour le full-FT ; ~-15-30 %), (2) sync de l'adapter seul via
+vLLM LoRARequest au lieu du reload complet (~-18 s/step, refonte vllm_engine à
+valider sur vLLM 0.9.1), (3) gpu_memory_utilization 0.17 → 0.3 (marginal).
+
+**Lundi** : lire `eval/pass_at_1` sur wandb (comparer à 30 = départ, 54 = lignée,
+58 = objectif), vérifier `.best_info` du best adapter, et décider : laisser finir /
+arrêter / re-run optimisé.
