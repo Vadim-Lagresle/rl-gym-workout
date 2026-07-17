@@ -1036,3 +1036,29 @@ artefacts : `runs/0_baselines/exp18_fewshot/`.
 
 **Suites possibles** : RL avec prompt few-shot k=5 (départ 31 au lieu de 18,
 plus de trajectoires à reward non nul pour GRPO) ; combinaison avec CoT tour 1.
+
+#### Exp 18b — pass@10 few-shot (oracle N=10, 2026-07-17) : le mur d3 se fissure
+
+| Config | pass@1 | pass@10 | d1@10 | d2@10 | d3@10 | d4@10 |
+|---|---|---|---|---|---|---|
+| zero-shot (réf. N=20) | 10.3 % | 37.8 % | 84 % | 29 % | **0 %** | 0 % |
+| few-shot k=5 | 27.7 % | 60.0 % | 100 % | 66 % | 8 % | 0 % |
+| few-shot k=20 | 27.0 % | **61.0 %** | 100 % | 63 % | **16 %** | 0 % |
+
+**Le résultat qui change le diagnostic** : à depth 3, le zero-shot n'échantillonnait
+JAMAIS de solution (pass@20 = 0, « mur de capacité », aucune graine GRPO). Avec 20
+exemples en prompt, 16 % des items d3 sont résolus au moins une fois sur 10 tirages
+(~4 items /25). Le mur d3 était donc en partie un artefact du prompt — **il existe
+désormais du signal exploitable par le RL à depth 3**. k=20 couvre mieux d3 que k=5
+(16 vs 8 %) à pass@1 égal : les exemples élargissent l'exploration, pas la fiabilité.
+d4 (3 items) reste à 0. Artefacts : `exp18_fewshot/oracle_base_k{05,20}/`.
+
+⚠ Note du 2026-07-17 : le best58 (exp10.8 mergé) n'est PLUS reconstructible — le
+maillon initial de la lignée LoRA (merge 35 % d'exp10.3) a été supprimé de models/
+sans backup, et les _best ne contiennent que les adapters. L'étude few-shot × best58
+demandée est bloquée en attendant un éventuel backup externe. Leçon : sauvegarder
+chaque merge de best sur disque persistant. Détail : docs/hebdo/21juillet/.
+
+**Suite privilégiée** : RL initialisé avec prompt few-shot k≈5-20 — départ pass@1
+~28-31, graines d3 disponibles, et l'écart pass@1→pass@10 (28→60) est exactement la
+marge de fiabilisation que GRPO sait convertir.

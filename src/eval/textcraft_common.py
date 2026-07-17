@@ -192,6 +192,56 @@ def load_existing_log(item_id: str, log_dir: Path) -> EpisodeResult | None:
         return None
 
 
+def load_fewshot(fewshot_file: str | Path, k: int,
+                 fmt: str = "dialogue") -> tuple[str, list[dict] | None]:
+    """Charge les k premiers exemples few-shot (exp18) et construit l'injection.
+
+    Retourne (fewshot_block, fewshot_messages) à passer à build_initial_messages :
+      - fmt="dialogue" (recommandé) : block = phrase d'annonce dans les règles,
+        messages = vrais tours user/assistant (1 action par tour, ReAct) ;
+      - fmt="bloc" : block = texte monolithique, messages = None.
+        ⚠ fait halluciner les observations (5-8/100 vs 18) — ablation uniquement.
+    """
+    with open(fewshot_file) as f:
+        examples = json.load(f)
+    if k > len(examples):
+        raise SystemExit(f"--fewshot {k} > {len(examples)} exemples disponibles dans {fewshot_file}")
+    picked = examples[:k]
+
+    if fmt == "bloc":
+        parts = [f"Here are {k} solved example task(s). Follow the same "
+                 f"reasoning and action format:"]
+        for i, e in enumerate(picked, start=1):
+            parts.append(f"=== EXAMPLE {i} ===\n{e['block']}")
+        parts.append("=== END OF EXAMPLES ===\nNow solve the new task I will give you.")
+        return "\n\n".join(parts), None
+
+    block = (f"I will first show you {k} solved example task(s), "
+             f"then give you a new task to solve.")
+    messages: list[dict] = []
+    carry = None
+    for e in picked:
+        task = ("Crafting commands:\n" + "\n".join(e["commands"])
+                + f"\n\nGoal: craft {e['goal_str']}.")
+        if carry:
+            task = carry + "\n\n" + task
+        messages.append({"role": "user", "content": task})
+        steps = e["steps"]
+        for j, st in enumerate(steps):
+            if j == 0:
+                content = f"Thought: {e['thought']}\n\nAction: {st['action']}"
+            else:
+                content = f"Action: {st['action']}"
+            messages.append({"role": "assistant", "content": content})
+            if j < len(steps) - 1:
+                messages.append({"role": "user", "content": st["observation"]})
+            else:
+                carry = st["observation"]
+    if carry:
+        messages.append({"role": "user", "content": carry})
+    return block, messages
+
+
 def pass_at_k(n: int, c: int, k: int) -> float:
     """Estimateur non biaisé pass@k (Chen et al. 2021, HumanEval) : probabilité qu'un
     sous-ensemble aléatoire de k tirages parmi n contienne >=1 réussite, sachant c

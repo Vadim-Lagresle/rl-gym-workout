@@ -49,10 +49,12 @@ from src.eval.textcraft_common import (
     DEFAULT_SYSTEM_PROMPT,
     ENV_SERVER_URL,
     MAX_ROUNDS,
+    REPO_ROOT,
     RUNS_DIR,
     build_initial_messages,
     item_id_to_idx,
     load_depth_map,
+    load_fewshot,
     load_items,
     pass_at_k,
     run_episode,
@@ -62,7 +64,9 @@ ORACLE_MAX_TOKENS = 512
 
 
 def run_one_pass_vllm(items: list[dict], gen: ChatGenerator, temperature: float,
-                      system_prompt: str, max_workers: int = 64) -> list[int]:
+                      system_prompt: str, max_workers: int = 64,
+                      fewshot_block: str | None = None,
+                      fewshot_messages: list[dict] | None = None) -> list[int]:
     """Une passe stochastique : 1 trajectoire par item. Toutes les trajectoires sont
     avancées en parallèle tour par tour (le serveur vLLM batche les générations, le pool
     de threads parallélise les appels HTTP de génération et de step env). Retourne la
@@ -77,7 +81,10 @@ def run_one_pass_vllm(items: list[dict], gen: ChatGenerator, temperature: float,
         c = TextCraftEnvClient(env_server_base=ENV_SERVER_URL, data_len=10000, timeout=60)
         c.reset(item_id_to_idx(it["item_id"]))
         clients.append(c)
-        states.append(build_initial_messages(c, system_prompt=system_prompt))
+        states.append(build_initial_messages(c, system_prompt=system_prompt,
+                                             fewshot_block=fewshot_block,
+                                             fewshot_messages=list(fewshot_messages)
+                                             if fewshot_messages else None))
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:
         for _ in range(MAX_ROUNDS):
@@ -115,13 +122,16 @@ def run_one_pass_vllm(items: list[dict], gen: ChatGenerator, temperature: float,
 
 
 def run_one_pass_hf(items: list[dict], gen: ChatGenerator, temperature: float,
-                    system_prompt: str, client: TextCraftEnvClient) -> list[int]:
+                    system_prompt: str, client: TextCraftEnvClient,
+                    fewshot_block: str | None = None,
+                    fewshot_messages: list[dict] | None = None) -> list[int]:
     """Une passe séquentielle via HF generate (le modèle in-process n'est pas thread-safe)."""
     generate_fn = lambda msgs: gen.generate(msgs, max_tokens=ORACLE_MAX_TOKENS,  # noqa: E731
                                             temperature=temperature)
     succ = []
     for it in items:
-        r = run_episode(generate_fn, client, it["item_id"], system_prompt=system_prompt)
+        r = run_episode(generate_fn, client, it["item_id"], system_prompt=system_prompt,
+                        fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
         succ.append(1 if r.reward >= 1.0 else 0)
     return succ
 
@@ -141,6 +151,12 @@ def main() -> None:
     ap.add_argument("--no-thinking", action="store_true",
                     help="Qwen3/3.5 : enable_thinking=False (backend hf)")
     ap.add_argument("--vllm-url", type=str, default=VLLM_SERVER_URL)
+    ap.add_argument("--fewshot", type=int, default=0,
+                    help="Nb d'exemples few-shot injectés (exp18). 0 = zero-shot. "
+                         "k>=20 : serveur vLLM 32768 requis.")
+    ap.add_argument("--fewshot-file", type=str,
+                    default=str(REPO_ROOT / "data" / "eval" / "textcraft_fewshot_examples.json"))
+    ap.add_argument("--fewshot-format", choices=["dialogue", "bloc"], default="dialogue")
     args = ap.parse_args()
 
     if args.temperature <= 0:
@@ -148,6 +164,12 @@ def main() -> None:
 
     gen = ChatGenerator(model_ref=args.model, backend=args.backend,
                         vllm_url=args.vllm_url, no_thinking=args.no_thinking)
+
+    fewshot_block, fewshot_messages = (None, None)
+    if args.fewshot > 0:
+        fewshot_block, fewshot_messages = load_fewshot(
+            args.fewshot_file, args.fewshot, args.fewshot_format)
+        print(f"[oracle] few-shot k={args.fewshot} format={args.fewshot_format}", flush=True)
 
     items = load_items(args.max_items)
     item_ids = [it["item_id"] for it in items]
@@ -182,9 +204,13 @@ def main() -> None:
         ts = time.time()
         if gen.backend_name == "vllm":
             col = run_one_pass_vllm(items, gen, args.temperature,
-                                    args.system_prompt, args.max_workers)
+                                    args.system_prompt, args.max_workers,
+                                    fewshot_block=fewshot_block,
+                                    fewshot_messages=fewshot_messages)
         else:
-            col = run_one_pass_hf(items, gen, args.temperature, args.system_prompt, hf_client)
+            col = run_one_pass_hf(items, gen, args.temperature, args.system_prompt, hf_client,
+                                  fewshot_block=fewshot_block,
+                                  fewshot_messages=fewshot_messages)
         done[s] = col
         with passes_fp.open("a") as f:  # checkpoint immédiat de la passe
             f.write(json.dumps({"pass": s, "successes": col, "items": item_ids}) + "\n")
@@ -224,6 +250,8 @@ def main() -> None:
         "n_samples": N,
         "n_items": n_items,
         "temperature": args.temperature,
+        "fewshot": args.fewshot,
+        "fewshot_format": args.fewshot_format if args.fewshot else None,
         "successes_per_item": {item_ids[i]: c[i] for i in range(n_items)},
         "pass_at_k_overall": {str(k): overall[k] for k in ks},
         "pass_at_k_by_depth": {str(d): {str(k): by_depth[d][k] for k in ks} for d in by_depth},

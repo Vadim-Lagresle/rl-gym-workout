@@ -46,6 +46,7 @@ from src.eval.textcraft_common import (
     RUNS_DIR,
     load_depth_map,
     load_existing_log,
+    load_fewshot,
     load_items,
     run_episode,
     write_episode_log,
@@ -214,57 +215,11 @@ def main() -> None:
     fewshot_block = None
     fewshot_messages = None
     if args.fewshot > 0:
-        import json
-        with open(args.fewshot_file) as f:
-            examples = json.load(f)
-        if args.fewshot > len(examples):
-            raise SystemExit(f"--fewshot {args.fewshot} > {len(examples)} exemples disponibles "
-                             f"dans {args.fewshot_file}")
-        picked = examples[:args.fewshot]
-
-        if args.fewshot_format == "bloc":
-            # Format monolithique historique (ablation) — fait halluciner les
-            # observations : voir runs/0_baselines/exp18_fewshot/format_bloc_*.
-            parts = [f"Here are {args.fewshot} solved example task(s). Follow the same "
-                     f"reasoning and action format:"]
-            for i, e in enumerate(picked, start=1):
-                parts.append(f"=== EXAMPLE {i} ===\n{e['block']}")
-            parts.append("=== END OF EXAMPLES ===\nNow solve the new task I will give you.")
-            fewshot_block = "\n\n".join(parts)
-        else:
-            # Format dialogue (ReAct) : chaque exemple devient de vrais tours
-            # user (observation) / assistant (Thought + UNE action). L'obs finale
-            # de chaque exemple ouvre le message user suivant ; la toute dernière
-            # est fusionnée avec la vraie tâche par build_initial_messages.
-            fewshot_block = (f"I will first show you {args.fewshot} solved example task(s), "
-                             f"then give you a new task to solve.")
-            fewshot_messages = []
-            carry = None
-            for e in picked:
-                task = ("Crafting commands:\n" + "\n".join(e["commands"])
-                        + f"\n\nGoal: craft {e['goal_str']}.")
-                if carry:
-                    task = carry + "\n\n" + task
-                fewshot_messages.append({"role": "user", "content": task})
-                steps = e["steps"]
-                for j, st in enumerate(steps):
-                    if j == 0:
-                        content = f"Thought: {e['thought']}\n\nAction: {st['action']}"
-                    else:
-                        content = f"Action: {st['action']}"
-                    fewshot_messages.append({"role": "assistant", "content": content})
-                    if j < len(steps) - 1:
-                        fewshot_messages.append({"role": "user", "content": st["observation"]})
-                    else:
-                        carry = st["observation"]
-            if carry:
-                fewshot_messages.append({"role": "user", "content": carry})
-
-        from collections import Counter
+        fewshot_block, fewshot_messages = load_fewshot(
+            args.fewshot_file, args.fewshot, args.fewshot_format)
         n_turns = len(fewshot_messages) if fewshot_messages else 0
         print(f"[fewshot] k={args.fewshot} exemples injectés, format={args.fewshot_format} "
-              f"(depths {dict(Counter(e['depth'] for e in picked))}, "
-              f"{n_turns} tours)" , flush=True)
+              f"({n_turns} tours)", flush=True)
 
     items = load_items(args.max_items)
 

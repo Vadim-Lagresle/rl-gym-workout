@@ -46,6 +46,21 @@ results:
     désynchronise. Leçon de prompt engineering : les démonstrations d'agent
     doivent être des tours de dialogue, pas du texte.
 
+results_pass_at_10:  # oracle N=10 x 100 items, format dialogue (2026-07-17)
+  zero_shot_ref_N20: "pass@10 37.8% (d1 84, d2 29, d3 0, d4 0)"   # 7_oracle/oracle_baseline
+  fewshot_k5: "pass@1 27.7% | pass@10 60.0% (d1 100, d2 66, d3 8, d4 0)"
+  fewshot_k20: "pass@1 27.0% | pass@10 61.0% (d1 100, d2 63, d3 16, d4 0)"
+  lecture: >
+    Le mur d3 se fissure : 0% de solutions échantillonnées en zero-shot (même à
+    pass@20) contre 8-16% pass@10 avec exemples → il existe désormais des graines
+    GRPO à depth 3. k=20 élargit l'exploration d3 sans améliorer pass@1.
+
+note_best58: >
+  L'étude few-shot x best58 (demandée le 17/07) est BLOQUÉE : le modèle mergé 58%
+  et le maillon initial de sa lignée (merge 35% exp10.3) ont été supprimés du disque
+  sans backup ; les _best ne contiennent que les adapters. Reconstruction scriptée
+  (merge_lora.py x3) dès qu'un backup d'un maillon réapparaît.
+
 verdict: >
   Le few-shot en format dialogue apporte +13 pts (18 → 31/100 à k=5, +72 %
   relatif) sans aucun entraînement — comparable au gain des premiers runs RL

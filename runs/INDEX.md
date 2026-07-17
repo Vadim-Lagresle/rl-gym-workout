@@ -28,7 +28,7 @@ Statuts : **référence** (comparable, à jour) · **config-only** (jamais lanc�
 | `exp13_gemma3_baseline` | Gemma-3-1B | config-only | — |
 | `exp14_deepseekr1_baseline` | DeepSeek-R1-Distill-Qwen-1.5B | config-only | — |
 | `exp_baseline_vllm_test` | smoke test 10 items | local, gitignoré | 2/10 |
-| `exp18_fewshot/` (k01…k50 + format_bloc_*) | Qwen2.5-3B + k exemples held-out (format dialogue) | référence | **31/100 @ k=5** (courbe dans son config.yaml) |
+| `exp18_fewshot/` (k01…k50 + format_bloc_*) | Qwen2.5-3B + k exemples held-out (format dialogue) | référence | **31/100 @ k=5** ; pass@10 **61%** @ k=20 (d3 : 0→16%) — courbes dans son config.yaml |
 
 Les 4 config-only se lancent d'un coup via `src/train/run_benchmark_baselines.sh`.
 
