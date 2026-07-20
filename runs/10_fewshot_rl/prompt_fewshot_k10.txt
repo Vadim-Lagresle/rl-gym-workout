@@ -1,0 +1,452 @@
+PROMPT EXACT exp19 (k=10, format dialogue) — le marqueur <ITEM_IDX:n> est
+remplacé par l observation initiale de la tâche au début de chaque rollout.
+============================================================================
+
+┌── system ──────────────────────────────────────────────────────────────
+You are Qwen, created by Alibaba Cloud. You are a helpful assistant.
+
+┌── user ────────────────────────────────────────────────────────────────
+You are given few useful crafting recipes to craft items in Minecraft. Crafting commands are of the format "craft [target object] using [input ingredients]".
+Every round I will give you an observation, you have to respond an action based on the state and instruction. You can "get" an object (ingredients) from the inventory or the environment, look-up the game inventory by "inventory", or "craft" (target) using any of the crafting commands.
+Your output must strictly follow this format:"Thought:
+your thoughts.
+
+Action:
+your next action"
+
+Reminder: 
+1. Always specify the quantity when using "get" and "craft" commands. - Example of get: get 1 lapis lazuli - Example1 of craft: craft 1 blue dye using 1 lapis lazuli - Example2 of craft: craft 1 golden carrot using 8 gold nugget, 1 carrot
+2. When using "get" command, do not specify whether the item comes from the inventory or the environment.
+3. You can use ONLY crafting commands provided, do not use your own crafting commands. However, if the crafting command uses a generic ingredient like "planks", you can use special types of the same ingredient e.g. "dark oak planks" in the command instead.
+
+
+
+I will first show you 10 solved example task(s), then give you a new task to solve.
+
+┌── assistant ───────────────────────────────────────────────────────────
+OK. I'll follow your instructions and try my best to solve the task.
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafting commands:
+craft 1 light gray dye using 1 white tulip
+craft 8 light gray terracotta using 8 terracotta, 1 light gray dye
+
+Goal: craft light gray terracotta.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 8 terracotta
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 8 terracotta
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 1 white tulip
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 1 white tulip
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 light gray dye using 1 white tulip
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:light_gray_dye
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 8 light gray terracotta using 8 terracotta, 1 light gray dye
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 8 minecraft:light_gray_terracotta
+
+Crafting commands:
+craft 4 stone bricks using 4 stone
+craft 6 stone brick slab using 3 stone bricks
+craft 1 chiseled stone bricks using 2 stone brick slab
+
+Goal: craft chiseled stone bricks.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 4 stone
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 4 stone
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 stone bricks using 4 stone
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:stone_bricks
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 6 stone brick slab using 3 stone bricks
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 6 minecraft:stone_brick_slab
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 chiseled stone bricks using 2 stone brick slab
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:chiseled_stone_bricks
+
+Crafting commands:
+craft 1 stick using 2 bamboo
+craft 1 stone sword using 1 stick, 2 stone tool materials
+
+Goal: craft stone sword.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 2 bamboo
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 2 bamboo
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 stick using 2 bamboo
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:stick
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 2 stone tool materials
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 2 stone tool materials
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 stone sword using 1 stick, 2 stone tool materials
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:stone_sword
+
+Crafting commands:
+craft 1 white dye using 1 lily of the valley
+craft 2 lime dye using 1 green dye, 1 white dye
+craft 8 lime terracotta using 8 terracotta, 1 lime dye
+
+Goal: craft lime terracotta.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 8 terracotta
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 8 terracotta
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 1 green dye
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 1 green dye
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 1 lily of the valley
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 1 lily of the valley
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 white dye using 1 lily of the valley
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:white_dye
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 2 lime dye using 1 green dye, 1 white dye
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 2 minecraft:lime_dye
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 8 lime terracotta using 8 terracotta, 1 lime dye
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 8 minecraft:lime_terracotta
+
+Crafting commands:
+craft 2 diorite using 2 quartz, 2 cobblestone
+craft 2 andesite using 1 diorite, 1 cobblestone
+craft 4 polished andesite using 4 andesite
+craft 6 polished andesite slab using 3 polished andesite
+
+Goal: craft polished andesite slab.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 2 quartz
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 2 quartz
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 2 cobblestone
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 2 cobblestone
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 2 diorite using 2 quartz, 2 cobblestone
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 2 minecraft:diorite
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 2 cobblestone
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 2 cobblestone
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 2 andesite using 1 diorite, 1 cobblestone
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 2 minecraft:andesite
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 2 andesite using 1 diorite, 1 cobblestone
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 2 minecraft:andesite
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 polished andesite using 4 andesite
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:polished_andesite
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 6 polished andesite slab using 3 polished andesite
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 6 minecraft:polished_andesite_slab
+
+Crafting commands:
+craft 1 black dye using 1 wither rose
+craft 8 black terracotta using 8 terracotta, 1 black dye
+
+Goal: craft black terracotta.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 8 terracotta
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 8 terracotta
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 1 wither rose
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 1 wither rose
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 black dye using 1 wither rose
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:black_dye
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 8 black terracotta using 8 terracotta, 1 black dye
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 8 minecraft:black_terracotta
+
+Crafting commands:
+craft 1 sandstone using 4 sand
+craft 6 sandstone slab using 3 sandstone
+craft 1 chiseled sandstone using 2 sandstone slab
+
+Goal: craft chiseled sandstone.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 12 sand
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 12 sand
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 sandstone using 4 sand
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:sandstone
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 sandstone using 4 sand
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:sandstone
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 sandstone using 4 sand
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:sandstone
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 6 sandstone slab using 3 sandstone
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 6 minecraft:sandstone_slab
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 chiseled sandstone using 2 sandstone slab
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:chiseled_sandstone
+
+Crafting commands:
+craft 4 acacia planks using 1 acacia logs
+craft 4 acacia stairs using 6 acacia planks
+
+Goal: craft acacia stairs.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 2 acacia logs
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 2 acacia logs
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 acacia planks using 1 acacia logs
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:acacia_planks
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 acacia planks using 1 acacia logs
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:acacia_planks
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 acacia stairs using 6 acacia planks
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:acacia_stairs
+
+Crafting commands:
+craft 4 acacia planks using 1 acacia logs
+craft 4 bowl using 3 planks
+craft 1 mushroom stew using 1 brown mushroom, 1 red mushroom, 1 bowl
+
+Goal: craft mushroom stew.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 1 brown mushroom
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 1 brown mushroom
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 1 red mushroom
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 1 red mushroom
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 1 acacia logs
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 1 acacia logs
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 acacia planks using 1 acacia logs
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:acacia_planks
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 bowl using 3 acacia planks
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:bowl
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 mushroom stew using 1 brown mushroom, 1 red mushroom, 1 bowl
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:mushroom_stew
+
+Crafting commands:
+craft 4 acacia planks using 1 acacia logs
+craft 1 chest using 8 planks
+craft 1 hopper using 1 chest, 5 iron ingot
+craft 1 minecart using 5 iron ingot
+craft 1 hopper minecart using 1 hopper, 1 minecart
+
+Goal: craft hopper minecart.
+
+┌── assistant ───────────────────────────────────────────────────────────
+Thought: I check which ingredients are base items I can get, craft the intermediate items first, then craft the goal.
+
+Action: get 2 acacia logs
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 2 acacia logs
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 acacia planks using 1 acacia logs
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:acacia_planks
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 4 acacia planks using 1 acacia logs
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 4 minecraft:acacia_planks
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 chest using 8 acacia planks
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:chest
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 5 iron ingot
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 5 iron ingot
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 hopper using 1 chest, 5 iron ingot
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:hopper
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: get 5 iron ingot
+
+┌── user ────────────────────────────────────────────────────────────────
+Got 5 iron ingot
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 minecart using 5 iron ingot
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:minecart
+
+┌── assistant ───────────────────────────────────────────────────────────
+Action: craft 1 hopper minecart using 1 hopper, 1 minecart
+
+┌── user ────────────────────────────────────────────────────────────────
+Crafted 1 minecraft:hopper_minecart
+
+Now solve this new task:
+
+<ITEM_IDX:31>
+

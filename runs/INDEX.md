@@ -110,7 +110,8 @@ Chiffres à retenir (extracteur informé) : 3B base ≈ 12 (moy sweep) · best58
 
 | Run | Méthode | Statut | Best |
 |---|---|---|---|
-| `exp19_fewshot_rl_k10` | GRPO LoRA depuis base, k=10 exemples dans chaque rollout, LR 7.33e-7, 4000 steps | en cours (lancé 2026-07-17, weekend) | objectif > 58 |
+| `exp19_fewshot_rl_k10` | GRPO LoRA depuis base, k=10 exemples/rollout, LR 7.33e-7 | interrompu step 847 (infra) | **43/100** @ step 400 (départ 30) |
+| `exp19.1_warmstart43` | warm-start depuis merge 43 %, même recette, 3200 steps | en cours (lancé 2026-07-20) | objectif > 58 |
 
 ## 9_legacy_pre_b200/ — ère A100/verl et premiers essais TRL (ne pas réutiliser)
 

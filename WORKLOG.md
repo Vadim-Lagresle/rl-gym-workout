@@ -2157,3 +2157,20 @@ valider sur vLLM 0.9.1), (3) gpu_memory_utilization 0.17 → 0.3 (marginal).
 **Lundi** : lire `eval/pass_at_1` sur wandb (comparer à 30 = départ, 54 = lignée,
 58 = objectif), vérifier `.best_info` du best adapter, et décider : laisser finir /
 arrêter / re-run optimisé.
+
+## 2026-07-20 — exp19 interrompu par l'infra (best 43 @ step 400), relance exp19.1 en warm-start
+
+- **exp19 : mort silencieuse au step 847/4000** (sam. 00:01, pendant une re-sync vLLM,
+  0 traceback en 846 steps). Le serveur TextCraft détaché est mort aussi et
+  `/tmp/trl_grpo_runs` a été purgé → restart pod / purge /tmp, pas un bug. Leçon
+  confirmée : /tmp ne survit PAS au weekend ici — seuls les artefacts du home restent.
+- **Ce qui a survécu** : le best adapter (home) — **43/100 au step 400** en condition
+  k=10 (départ 30 = baseline promptée sans RL, +13 par le RL). Courbe : montée 31→43
+  (step 400) puis oscillation 31-39 sous le pic (motif lignée exp10).
+- **Relance exp19.1_warmstart43** (recette exp10) : adapter 43 % mergé sur la base
+  (`/tmp/models/qwen25_3b_exp19_step400_43pct`, reconstructible — base + adapter tous
+  deux persistants, commande dans le config), nouveau run LoRA k=10, MÊME LR 7.333e-7
+  (crash infra ≠ collapse → on ne divise pas), 3200 steps, `--best-init-score 0.43`.
+  PID 124358, wandb `xot78w1c`, 1er rollout : 22/64 trajectoires à reward>0.
+- Prompt exp19 documenté : `runs/10_fewshot_rl/prompt_fewshot_k10.txt` (114 messages) ;
+  les 10 exemples = 4×d2, 4×d3, 2×d4 (0 d1 disponible hors train/test).

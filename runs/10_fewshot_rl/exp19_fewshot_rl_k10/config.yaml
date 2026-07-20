@@ -71,5 +71,23 @@ hypotheses:
     prompt et celui du RL sont redondants (ils fiabilisent les mêmes items
     d1-d2) plutôt qu'additifs.
 
-results: ~
-verdict: ~
+results:
+  status: INTERROMPU au step 847/4000 (2026-07-19 00:01) — mort silencieuse pendant
+    une re-sync vLLM, 0 traceback en 846 steps ; le serveur TextCraft (détaché) est
+    mort aussi et /tmp/trl_grpo_runs a été purgé → événement infra (restart pod /
+    purge /tmp), pas un bug du code. Les checkpoints /tmp sont perdus ; le best
+    adapter (home) a survécu.
+  best_pass_at_1: 43/100 (step 400)   # eval en condition k=10 ; baseline sans RL = 30
+  best_checkpoint: saves/trl_grpo/exp19_fewshot_rl_k10_best  # adapter, home persistant
+  eval_curve: >
+    step 50: 31 | 100: 32 | 150: 33 | 200: 39 | 250: 34 | 300: 23 | 350: 30 |
+    400: 43 | 450: 37 | 500: 39 | 550: 34 | 600: 31 | 650: 39 | 700: 37 |
+    750: 39 | 800: 36
+  duree: ~33 h, ~140 s/step effectif (évals incluses)
+
+verdict: >
+  Le RL progresse au-dessus de la baseline promptée (30 → 43 au step 400, +13)
+  puis oscille sous son pic — même motif que la lignée exp10 (le best précède
+  le plateau). Relance en warm-start depuis le best (exp19.1), recette exp10 :
+  merge de l'adapter 43% sur la base (reconstructible : base + adapter tous
+  deux persistants) puis nouveau run LoRA au même LR.

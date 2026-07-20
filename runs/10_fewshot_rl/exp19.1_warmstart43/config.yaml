@@ -1,0 +1,63 @@
+name: exp19.1_warmstart43
+date: 2026-07-20
+description: >
+  Reprise d'exp19 (interrompu step 847 par un événement infra, checkpoints /tmp
+  perdus) depuis son BEST (43/100 au step 400) — recette warm-start de la lignée
+  exp10 : l'adapter best est fusionné dans la base (merge reconstructible, base et
+  adapter tous deux sur disque persistant), puis nouveau run LoRA au même LR.
+  Même protocole few-shot k=10 que exp19 (exemples held-out, format dialogue,
+  identiques — voir ../prompt_fewshot_k10.txt pour le prompt exact).
+
+algorithm: GRPO (TRL + vLLM in-process), LoRA r=16/α=32, few-shot k=10 dans le prompt
+model: /tmp/models/qwen25_3b_exp19_step400_43pct  # base + adapter exp19_best mergé (43%)
+model_reconstruction: >
+  python src/utils/merge_lora.py --base models/Qwen2.5-3B-Instruct
+    --adapter saves/trl_grpo/exp19_fewshot_rl_k10_best
+    --out /tmp/models/qwen25_3b_exp19_step400_43pct
+script: src/train/train_grpo.py --fewshot 10
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+wandb: (rempli au lancement)
+
+training:
+  fine_tuning: LoRA (nouvel adapter sur le modèle mergé 43%)
+  num_generations: 8
+  gradient_accumulation_steps: 64
+  max_completion_length: 512
+  max_steps: 3200                  # ≈ budget restant d'exp19 (4000 - 847)
+  learning_rate: 7.333e-7          # inchangé (crash infra, pas collapse — on ne divise pas)
+  beta_kl: 0.01
+  fewshot: 10                      # 4×d2, 4×d3, 2×d4 (0 d1 disponible hors train/test)
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  best_init_score: 0.43            # ne jamais sauver pire que le best d'exp19
+  save_steps: 47
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs  # volatil (purgé pendant exp19) — le best va sur le home
+
+command: >
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --max-steps 3200 --learning-rate 7.333e-7 --beta 0.01
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100 --best-init-score 0.43
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --model-path /tmp/models/qwen25_3b_exp19_step400_43pct
+    --use-vllm-inprocess --run-name exp19.1_warmstart43
+    > logs/exp19.1_warmstart43.log 2>&1 &
+
+lineage: >
+  base --LoRA k=10 (exp19, best step 400)--> 43% (merge /tmp, reconstructible)
+  --warmstart LoRA k=10--> exp19.1 (ce run)
+
+references_pour_lecture:
+  base_fewshot_k10_sans_RL: 30/100
+  exp19_best: 43/100
+  lignee_sans_fewshot: 54/100
+  objectif: "> 58"
+
+results: ~
+verdict: ~
