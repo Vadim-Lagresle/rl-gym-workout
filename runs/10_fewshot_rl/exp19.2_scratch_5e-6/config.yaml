@@ -1,0 +1,61 @@
+name: exp19.2_scratch_5e-6
+date: 2026-07-20
+description: >
+  Étage 1 de la lignée « RL + few-shot » rejouée proprement (décision Vadim après
+  l'audit du 20/07) : GRPO LoRA depuis le Qwen2.5-3B NU, k=10 exemples dans chaque
+  rollout, au LR d'APPRENTISSAGE de la lignée historique (5e-6 = régime exp10.3),
+  beta 0.01. L'échelle complète prévue, comparable étage par étage à exp10 :
+  5e-6 (cet étage) → merge du best → 3.33e-6 → merge → 2.2e-6 → … → 7.33e-7.
+  Leçon d'exp19/19.1 : le LR doit suivre le niveau de l'ancre — 7.33e-7 depuis
+  zéro produit un adaptateur de polissage (||delta||~0.12) et un gain de
+  polissage (+4), là où 3.33e-6 avait produit ||delta||~0.72 et +16 (exp10.5).
+
+algorithm: GRPO (TRL + vLLM in-process), LoRA r=16/α=32, few-shot k=10 dans le prompt
+model: models/Qwen2.5-3B-Instruct   # depuis zéro — ancre = Qwen nu
+script: src/train/train_grpo.py --fewshot 10
+hardware: 1× B200 192 GB HBM3e (Criteo JupyterHub)
+wandb: (rempli au lancement)
+
+training:
+  fine_tuning: LoRA
+  num_generations: 8
+  gradient_accumulation_steps: 64
+  max_completion_length: 512
+  max_steps: 1000                   # l'étage 5e-6 (les bests exp10.3/10.5 tombaient vers 370-420)
+  learning_rate: 5e-6               # régime exp10.3 (l'étage d'apprentissage, pas de polissage)
+  beta_kl: 0.01
+  fewshot: 10                       # 4×d2, 4×d3, 2×d4 — mêmes exemples fixes qu'exp19
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs
+
+command: >
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --max-steps 1000 --learning-rate 5e-6 --beta 0.01
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp19.2_scratch_5e-6
+    > logs/exp19.2_scratch_5e-6.log 2>&1 &
+
+references_pour_lecture:
+  base_fewshot_k10_sans_RL: 30/100   # le départ attendu
+  exp10_3_meme_LR_sans_fewshot: "≈30 → 35"
+  exp19_lr_polissage: "30 → ~35 réel (43 = pic bruité)"
+  objectif_etage: "dépasser nettement 40 avant le prochain warm-start"
+
+risques:
+  collapse: >
+    exp10 (LR 1.5e-5, beta 0.001) s'était effondré ; ici 5e-6 + beta 0.01 = le
+    couple validé par exp10.3. Surveiller kl et completions/mean_length sur wandb ;
+    le save-best protège le meilleur état quoi qu'il arrive.
+
+results: ~
+verdict: ~

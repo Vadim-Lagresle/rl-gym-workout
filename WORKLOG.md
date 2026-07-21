@@ -2174,3 +2174,24 @@ arrêter / re-run optimisé.
   PID 124358, wandb `xot78w1c`, 1er rollout : 22/64 trajectoires à reward>0.
 - Prompt exp19 documenté : `runs/10_fewshot_rl/prompt_fewshot_k10.txt` (114 messages) ;
   les 10 exemples = 4×d2, 4×d3, 2×d4 (0 d1 disponible hors train/test).
+
+## 2026-07-20 (suite) — Audit exp19 : le LR doit suivre le niveau de l'ancre ; exp19.2 lancé
+
+Interrogation Vadim : exp19/19.1 apprennent moins bien que la lignée exp10. Audit en 3 volets :
+1. **Code (refacto) : sain.** Chemins de chargement corrects, merge vérifié AU TENSEUR
+   (W_merged = W_base + α/r·B·A à 1e-5), adaptateur non nul, loss/grad/KL actifs,
+   step-0 d'exp19 à 30/64 = exactement la baseline promptée (poids corrects).
+2. **Exemples few-shot : facteur mineur.** Recopie hors-tâche dans 12/100 transcripts
+   (surtout hopper minecart, l'exemple d4) ; erreurs dominantes génériques
+   (missing_items/item_not_found/format ~4.5-4.7/ép) et SANS amélioration au fil du
+   training → apprentissage trop lent, pas confusion.
+3. **LA cause : LR désassorti au niveau de l'ancre.** Échelle historique reconstituée
+   (logs bruts) : exp10 1.5e-5 (collapse, beta 0.001) → exp10.3 5e-6 (→35) →
+   exp10.5 3.33e-6 (**+16**, ||delta_adapter||=0.72) → exp10.7 2.2e-6 (+2, 0.13) →
+   exp10.8 7.33e-7 (+1-4, 0.12). exp19 a pris 7.33e-7 (polissage) depuis zéro →
+   ||delta||=0.12 → gain de polissage (+4-5 réels ; le « 43 » = winner's curse,
+   vrai niveau ~35 — confirmé par exp19.1 qui oscille à 28-37 sur son ancre).
+Décision Vadim : arrêt d'exp19.1 (~step 580, ablation LR documentée dans son config) et
+**exp19.2_scratch_5e-6** lancé — échelle complète rejouée depuis zéro avec k=10 :
+étage 1 à 5e-6/beta 0.01 (couple validé exp10.3), 1000 steps, PID 2815881,
+wandb 7cj9m9ph. Étages suivants : merge du best → 3.33e-6 → …

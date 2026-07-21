@@ -59,5 +59,19 @@ references_pour_lecture:
   lignee_sans_fewshot: 54/100
   objectif: "> 58"
 
-results: ~
-verdict: ~
+results:
+  status: ARRÊTÉ volontairement au step ~580/3200 (2026-07-20, décision Vadim après audit)
+  eval_curve: >
+    step 50: 30 | 100: 33 | 150: 31 | 200: 28 | 250: 37 | 300: 35 | 350: 36 |
+    400: 35 | 450: 33 | 500: 37 | 550: 31   (moyenne ~33.5, aucun best > 43 sauvé)
+
+verdict: >
+  Ablation LR involontairement instructive : à 7.333e-7 (régime de POLISSAGE de la
+  lignée exp10, calibré pour une ancre à 53%), un run depuis une ancre à ~35 ne
+  bouge quasiment pas (~+1 en 550 steps). L'audit du 2026-07-20 a montré : (1) le
+  code et le merge sont corrects (vérif tensorielle W_merged = W_base + α/r·B·A) ;
+  (2) le « 43 » d'exp19 était un pic mono-tirage (winner's curse, vrai niveau ~35) ;
+  (3) la norme de l'adaptateur (0.12) = celle des étapes de polissage, 6× plus
+  petite que l'adaptateur d'apprentissage d'exp10.5 (0.72, LR 3.33e-6, +16 pts).
+  Le LR doit suivre le niveau de l'ancre. Remplacé par exp19.2 (échelle complète
+  depuis zéro : 5e-6 puis descente, avec few-shot k=10).
