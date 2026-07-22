@@ -2221,3 +2221,35 @@ confirmé). Le save-best a protégé `saves/trl_grpo/exp19.2_scratch_5e-6_best`
 exp19.2) : warm-start depuis ce 45%, LR intermédiaire ~2-3e-6, et surveiller
 KL en continu (arrêt anticipé si dérive soutenue) plutôt que d'attendre le
 prochain point d'éval à 50 steps.
+
+## 2026-07-21 (suite) — Mécanisme de continuation « même adaptateur, même ancre KL » trouvé, exp19.3 préparé (rien lancé)
+
+Bilan de la lignée exp19 posé au propre : exp19 (43 pic/~35 réel, LR polissage mal
+assorti), exp19.1 (ablation LR, quasi immobile), **exp19.2 (26→45 au step 300, MEILLEUR
+résultat honnête de la lignée few-shot) puis collapse KL (×3500) entre les steps 350-450**
+— diagnostiqué hier comme un collapse classique, pas du reward hacking (le reward sparse
+n'a pas de shaping exploitable et s'est effondré). Best 45/100 protégé sur le home
+(`saves/trl_grpo/exp19.2_scratch_5e-6_best`).
+
+Vadim demande de reprendre depuis ce best45 avec LR ÷3, **sans déplacer l'ancre KL vers
+45 %** (comme l'avait fait le warm-start merge d'exp19.1) et **sans repartir d'un adaptateur
+neuf** qui perdrait l'acquis. Recherche du mécanisme exact dans TRL 1.4.0 installé :
+
+- **Piège trouvé** : charger le best45 sur un `PeftModel` posé sur Qwen (sans merge) puis
+  passer ce `PeftModel` déjà instancié à un nouveau `GRPOTrainer` NE marche PAS — TRL
+  (`grpo_trainer.py:359-371`) détecte un `PeftModel` déjà construit et **clone l'adaptateur
+  chargé en un second adaptateur `"ref"` figé** pour la KL → l'ancre se retrouve quand même
+  sur le best45, par un autre mécanisme (clonage au lieu de merge dense).
+- **Mécanisme qui marche** (vérifié bout en bout sur le vrai modèle) : passer la base comme
+  chemin (pas d'objet PeftModel) pour que TRL crée un adaptateur neuf standard (B=0, aucun
+  `"ref"` ajouté), puis **injecter les poids du best45 juste après la construction du
+  trainer** via `peft.set_peft_model_state_dict(trainer.model, adapter_state_dict,
+  adapter_name="default")`. Vérifié : 504 clés chargées, `‖B‖` 0→0,749 après injection,
+  `model.peft_config.keys() == ['default']` seul, `disable_adapter()` révèle Qwen pur.
+  Les deux contraintes de Vadim sont satisfaites simultanément. Seule concession (déjà
+  actée) : l'état Adam repart de zéro (pas de checkpoint TRL complet, adaptateur seul sauvé).
+
+**Rien n'a été lancé.** Plan complet (code `--adapter-init`, smokes, paramètres proposés
+LR=1,667e-6/beta=0,01/best-init=0,45/eval-every=25 à confirmer) documenté dans
+`docs/hebdo/21juillet/session_2026-07-21_exp19_bilan_et_continuation_adapter.md` — à
+reprendre à la prochaine session.
