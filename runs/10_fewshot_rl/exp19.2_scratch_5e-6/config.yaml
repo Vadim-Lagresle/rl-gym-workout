@@ -57,5 +57,27 @@ risques:
     couple validé par exp10.3. Surveiller kl et completions/mean_length sur wandb ;
     le save-best protège le meilleur état quoi qu'il arrive.
 
-results: ~
-verdict: ~
+results:
+  status: ARRÊTÉ manuellement au step 557/1000 (2026-07-21, décision Vadim — suspicion
+    de reward hacking, écartée par l'analyse : c'est un collapse par emballement KL)
+  eval_curve: >
+    step 50: 26 | 100: 39 | 150: 37 | 200: 43 | 250: 41 | 300: 45 | 350: 42 |
+    400: 18 | 450: 2 | 500: 5 | 550: 3
+  best_pass_at_1: 45/100 (step 300)   # MEILLEUR résultat honnête de la lignée exp19
+  best_checkpoint: saves/trl_grpo/exp19.2_scratch_5e-6_best  # adapter, home persistant
+  kl_curve: "~0.0007-0.0008 stable steps 1-350 -> 1.76 (step ~450) -> 2.76 (step 550), ×3500"
+  completions_mean_length: "~590-741 tokens (phase saine) -> 1700-2037 tokens (phase collapse)"
+
+verdict: >
+  PAS un reward hacking (le reward sparse 0/1 n'a pas de shaping exploitable, et il s'est
+  EFFONDRÉ, pas maintenu artificiellement haut). Diagnostic confirmé par les logs : run
+  sain et en progression jusqu'au step 300 (26→45, meilleur point réel de toute la lignée
+  exp19, dépassant le pic winner's-curse 43 d'exp19), puis divergence brutale entre les
+  steps 350-450 — KL explose ×3500, grad_norm monte, completions doublent/triplent,
+  pass@1 s'effondre à 2-5. Collapse classique de policy RL (beta=0.01 insuffisant à
+  retenir la dérive une fois enclenchée), pas un artefact de la fonction reward.
+  Le save-best a protégé le step 300 (45/100) avant la casse — c'est l'état à reprendre.
+  Piste de suite (à valider avant relance) : warm-start depuis ce best 45%, LR intermédiaire
+  entre le régime d'apprentissage (5e-6, celui-ci) et le régime de polissage (7.33e-7),
+  ex. 2-3e-6, avec surveillance rapprochée de kl (arrêt anticipé si kl > ~0.05-0.1
+  soutenu sur plusieurs évals, plutôt que d'attendre le prochain point d'éval à 50 steps).
