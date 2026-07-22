@@ -112,7 +112,7 @@ Chiffres à retenir (extracteur informé) : 3B base ≈ 12 (moy sweep) · best58
 |---|---|---|---|
 | `exp19_fewshot_rl_k10` | GRPO LoRA depuis base, k=10 exemples/rollout, LR 7.33e-7 | interrompu step 847 (infra) | **43/100** @ step 400 (départ 30) |
 | `exp19.1_warmstart43` | warm-start merge exp19, LR 7.33e-7 | arrêté step ~580 (ablation LR : polissage ≈ immobile) | ~33-37 |
-| `exp19.2_scratch_5e-6` | échelle rejouée depuis zéro : LR 5e-6 (régime exp10.3) + k=10, étage 1/n | en cours (lancé 2026-07-20) | départ ~30, objectif étage > 40 |
+| `exp19.2_scratch_5e-6` | LR 5e-6 (régime exp10.3) + k=10, depuis zéro | arrêté step 557 (collapse KL ×3500 après le pic) | **45/100 @ step 300** (best honnête du projet côté few-shot) |
 
 ## 9_legacy_pre_b200/ — ère A100/verl et premiers essais TRL (ne pas réutiliser)
 

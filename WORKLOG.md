@@ -2195,3 +2195,29 @@ Décision Vadim : arrêt d'exp19.1 (~step 580, ablation LR documentée dans son 
 **exp19.2_scratch_5e-6** lancé — échelle complète rejouée depuis zéro avec k=10 :
 étage 1 à 5e-6/beta 0.01 (couple validé exp10.3), 1000 steps, PID 2815881,
 wandb 7cj9m9ph. Étages suivants : merge du best → 3.33e-6 → …
+
+## 2026-07-21 — exp19.2 : collapse KL au step ~400 (pas reward hacking), best 45/100 sauvé
+
+Suspicion de Vadim : reward hacking. Vérification par les logs (train reward,
+completions/mean_length, KL, corrélation succès/nb-de-tours) — écartée : le
+reward sparse 0/1 n'a pas de shaping exploitable, ET il s'est **effondré**
+(pas maintenu artificiellement haut), signature qui exclut le hacking au sens
+strict du projet (cf. exp2/v2-v3 historiques, un vrai cas de shaping exploité).
+
+**Diagnostic réel : collapse par emballement KL.** Courbe d'éval : 26→45 (step
+300, sain, MEILLEUR point honnête de toute la lignée exp19 — dépasse le pic
+winner's-curse 43 d'exp19) puis divergence brutale steps 350-450 : KL ×3500
+(0.0008→2.76), grad_norm monte, completions doublent/triplent (590→2000 tok),
+pass@1 s'effondre à 2-5. `beta=0.01` (couple validé exp10.3) n'a pas suffi à
+retenir la dérive une fois enclenchée — à LR d'apprentissage (5e-6), le collapse
+reste un risque réel, contrairement au régime de polissage (7.33e-7) plus stable
+mais quasi-immobile depuis une ancre basse (cf. leçon exp19.1 du 20/07).
+
+Run arrêté (SIGTERM puis SIGKILL sur le vrai PID train_grpo.py, GPU libéré,
+confirmé). Le save-best a protégé `saves/trl_grpo/exp19.2_scratch_5e-6_best`
+(step 300, 45/100) avant la casse.
+
+**Aucune relance sans validation de Vadim.** Piste proposée (dans le config
+exp19.2) : warm-start depuis ce 45%, LR intermédiaire ~2-3e-6, et surveiller
+KL en continu (arrêt anticipé si dérive soutenue) plutôt que d'attendre le
+prochain point d'éval à 50 steps.
