@@ -97,3 +97,79 @@ perturber les runs en cours. Non fait aujourd'hui, à planifier si souhaité.
 - `/tmp` : 194 Go libres après ces tests (sur 426 Go). `/home` : 2,6 Go libres (93 % plein) —
   **à surveiller**, plusieurs installations/téléchargements récents (checkpoints exp19,
   ce test) l'ont rempli progressivement.
+
+## 6. Complément (même journée) — flash-attention validé, et la vraie portée du « bricolage »
+
+### flash-attention fonctionne réellement
+
+Pas de wheel précompilé pour torch 2.11 / CUDA 13 (trop récent) → compilation depuis les
+sources (`pip install flash-attn --no-build-isolation`), ~50 min (72 fichiers `.cu`, kernels
+générés pour 4 architectures GPU sm_80/90/100/120 par fichier). **`flash-attn 2.8.3.post1`
+installé et testé fonctionnellement** (pas juste importé) :
+`AutoModelForCausalLM.from_pretrained(..., attn_implementation="flash_attention_2")` sur
+Qwen2.5-3B → `model.config._attn_implementation == "flash_attention_2"` (pas de repli
+silencieux vers `sdpa`) + génération correcte. C'est exactement le point que `CLAUDE.md`
+documentait comme bloqué par le glibc 2.28 (`attn_implementation=sdpa` en repli) — débloqué.
+
+### La découverte qui change le cadre : TRL 1.9.0 gère nativement notre cas d'usage
+
+En lisant le code de TRL 1.9.0 installé à côté (pas seulement sa doc) :
+
+- **Compatibilité déclarée** : `TRL currently supports vLLM versions from 0.17.0 to 0.25.1`
+  (contre `0.12.0 to 0.18.0` en 1.4.0, la version installée en production). Notre paire
+  actuelle TRL 1.4.0 / vLLM 0.9.1 est hors de la fenêtre déclarée depuis le début — pas
+  seulement bridée par le glibc, un vrai décalage de version.
+- **Le contrat `rollout_func` est identique** : `required_keys = {"prompt_ids",
+  "completion_ids", "logprobs"}`, et `env_mask` explicitement reconnu (littéralement le
+  même nom que notre code) avec le commentaire « Support custom env_mask from rollout_func
+  (e.g., for environment feedback masking) ». `rollout.py`/`snis.py`/`data.py` (toute la
+  boucle multi-tour TextCraft) n'auraient vraisemblablement pas besoin d'être réécrits.
+- **Nouveauté absente de 1.4.0** : quand `rollout_func` ET `use_vllm=True` sont actifs
+  ensemble, TRL 1.9.0 appelle **automatiquement** `self.vllm_generation.sync_weights()`
+  avant chaque appel à notre `rollout_func` (`grpo_trainer.py:2151-2153`, commentaire
+  « Keep vLLM weights in sync for custom rollouts that rely on vLLM utilities »). C'est
+  exactement ce que `src/train/vllm_engine.py` fait à la main aujourd'hui (merge adaptateur
+  → écriture ~5,8 Go sur disque → destruction/recréation du moteur, ~20-25 % du temps de
+  step mesuré lors du profiling exp19). Cette fonctionnalité n'existait pas (ou pas sous
+  cette forme) en TRL 1.4.0 — c'est elle qui a motivé la construction de `vllm_engine.py`
+  à la main à l'époque.
+
+### Ce qui reste nécessaire quoi qu'il arrive vs ce qui pourrait disparaître
+
+Le « bricolage » a deux parties distinctes, à ne pas confondre :
+1. **La boucle multi-tour TextCraft** (`rollout.collect_episodes` : get/craft/observe round
+   par round) — nécessaire quelle que soit la version de TRL/vLLM ; TRL ne fait pas
+   nativement d'interaction environnement multi-tour. Cette partie resterait quasi inchangée.
+2. **Le mécanisme de sync du moteur vLLM** (`vllm_engine.py` : `init_engine`, `generate_round`,
+   `sync_trl_to_vllm`, `VllmSyncCallback`) — c'est la partie qui pourrait être remplacée par
+   `use_vllm=True` + l'appel à `trainer.vllm_generation` (au lieu de notre propre moteur géré
+   à la main) depuis l'intérieur de `rollout_func`.
+
+### Portée exacte de ce qui a été vérifié aujourd'hui (à ne pas sur-interpréter)
+
+Tout ce qui précède sur TRL 1.9.0 est de la **lecture de code**, pas un test live de bout en
+bout. N'a PAS été fait : construire un vrai `GRPOTrainer` avec `use_vllm=True` +
+`rollout_func` + un vrai step d'entraînement sur ce venv de test ; vérifier que
+`trainer.vllm_generation` expose une API de génération utilisable depuis notre boucle
+multi-tour ; vérifier la cohabitation mémoire GPU de deux moteurs (modèle d'entraînement +
+vLLM colocate) dans ce nouveau contexte. **Rien n'a été modifié dans `src/` ni dans
+`~/envs/agentgym-rl` — uniquement le venv de test jetable sur `/tmp`.**
+
+### Disque après ces tests
+
+`/tmp` : 226 Go libres (venv vLLM 11 Go incluant flash-attn compilé, modèles téléchargés
+17 Go — Qwen3.5-4B + Qwen3-4B). `/home` : 2,5 Go libres (93 % plein, stable).
+
+### Proposition de plan de migration (à valider avant tout code)
+
+1. **Étape isolée suivante** : dans ce même venv de test, construire un `GRPOTrainer` minimal
+   (`use_vllm=True, vllm_mode="colocate"`, notre `rollout_func`) sur 1-2 items, vérifier que
+   `sync_weights()` s'invoque et que `rollout_func` peut appeler le moteur vLLM de TRL.
+2. Si concluant : adapter `vllm_engine.py` pour utiliser `trainer.vllm_generation` au lieu de
+   notre moteur maison (garder `rollout.py`/`snis.py` quasi inchangés).
+3. Valider à sec puis en smoke GPU (comme pour tout run), avant tout run long.
+4. Seulement alors : migrer `~/envs/agentgym-rl` lui-même (ou créer un nouvel env dédié),
+   avec un rollback possible (l'env actuel n'est jamais supprimé tant que la bascule n'est
+   pas validée sur plusieurs runs).
+
+Rien de tout cela n'a été exécuté aujourd'hui au-delà du point 0 (le venv isolé lui-même).
