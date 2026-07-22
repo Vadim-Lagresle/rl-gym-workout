@@ -110,10 +110,13 @@ def collect_episodes(prompts: list[list[dict[str, str]]], trainer: Any) -> list[
                 if round_idx == 0:
                     episodes[i].prompt_ids = pids
 
-            if vllm_engine.LLM_ENGINE is not None:
-                # vLLM in-process : tous les épisodes actifs en un appel (prefix caching).
+            if vllm_engine.get_engine(trainer) is not None:
+                # Moteur vLLM colocate géré par TRL (poids déjà synchronisés par TRL
+                # avant l'appel à rollout_func) : tous les épisodes actifs en un
+                # appel (prefix caching).
                 round_completion_ids, round_logprobs = vllm_engine.generate_round(
-                    tokenizer, states, active, max_tokens=trainer.args.max_completion_length
+                    trainer, tokenizer, states, active,
+                    max_tokens=trainer.args.max_completion_length,
                 )
             else:
                 # HF _generate_single_turn : ré-encode le contexte complet à chaque round.

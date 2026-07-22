@@ -12,12 +12,12 @@ comment y remédier avec les outils modernes (curriculum, SCPO, BOND, CoT, mix S
 
 | Composant | Détail |
 |---|---|
-| Modèle base | Qwen2.5-3B-Instruct (cible paper) |
-| Framework RL | **TRL GRPO + vLLM** (stack principale, toutes nouvelles expés) |
-| Framework RL legacy | verl (fork AgentGym-RL) — expés 1-6 uniquement, ne pas utiliser pour les nouvelles |
+| Modèle base | Qwen2.5-3B-Instruct (cible paper) — Qwen3/3.5 désormais servables (stack v2) |
+| Framework RL | **TRL ≥1.9 GRPO + vLLM ≥0.25 colocate + flash-attention** (stack v2, 2026-07-22) |
+| Framework RL legacy | verl (exp1-6) ; TRL 1.4/vLLM 0.9.1 (exp7-19.2, env `~/envs/agentgym-rl` conservé en rollback) |
 | Env benchmark | TextCraft via serveur HTTP FastAPI (port 36005) |
-| GPU VM | **B200 192 Go HBM3e** (single GPU, nouvelles expés) — ex-A100 40 Go pour les anciens runs |
-| Envs conda | `agentgym-rl` (entraînement TRL), `agentenv-textcraft` (serveur jeu + label_depths.py) |
+| GPU VM | **B200 192 Go HBM3e** (single GPU) — VM migrée CentOS Stream 10 / glibc 2.39 (2026-07-20) |
+| Envs Python | **v2 : `/tmp/envs/agentgym-rl-v2`** (⚠ /tmp volatil — reconstruire via `setup/setup_agentgym_rl_v2.sh`, ~10 min grâce au wheel flash-attn dans `saves/wheels/`) ; `agentenv-textcraft` (serveur jeu) |
 
 ## Architecture du projet (refacto 2026-07-16)
 
@@ -29,7 +29,7 @@ rl-gym-workout/
 │   │   ├── train_grpo_snis.py    # ENTRYPOINT SNIS (parser partagé + --snis-*)
 │   │   ├── rollout.py            # LA boucle env par tour + contrat TRL + reward
 │   │   ├── snis.py               # recombinaison SNIS (config, scoring, selftest)
-│   │   ├── vllm_engine.py        # moteur vLLM in-process + sync de poids
+│   │   ├── vllm_engine.py        # accès au moteur vLLM colocate de TRL + save modèle
 │   │   ├── periodic_eval.py      # éval test périodique + save du best
 │   │   ├── data.py / schedules.py / diagnostics.py
 │   │   └── run_curriculum_staged.sh, run_benchmark_baselines.sh
@@ -82,24 +82,28 @@ rl-gym-workout/
 ## Commandes de démarrage de session
 
 ```bash
-# Panneau 1 — serveur TextCraft
-conda activate agentenv-textcraft
+# Panneau 1 — serveur TextCraft (depuis le dossier du package : chemin relatif recipes/)
+source ~/envs/agentenv-textcraft/bin/activate
+cd ~/rl-gym-workout/external/AgentGym/agentenv-textcraft
 textcraft --host 127.0.0.1 --port 36005
 
-# Panneau 2 — entraînement ou eval
-conda activate agentgym-rl
+# Panneau 2 — entraînement ou eval (env v2 ; le reconstruire s'il a été purgé de /tmp)
+[ -d /tmp/envs/agentgym-rl-v2 ] || bash ~/rl-gym-workout/setup/setup_agentgym_rl_v2.sh
+export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH"   # requis : les sous-process vLLM cherchent ninja dans le PATH
 cd ~/rl-gym-workout
 ```
 
 ## Stack d'évaluation (à utiliser systématiquement)
 
 **Un seul point d'entrée : `src/eval/eval_textcraft.py`.** Le backend se choisit par
-`--backend` : `vllm` (serveur, KV cache, ~15 min/100 items — checkpoints 3B standard)
-ou `hf` (HuggingFace in-process, lent mais universel — OBLIGATOIRE pour les archis que
-vLLM 0.9.1 ne sert pas, ex. Qwen3.5 ; ajouter `--no-thinking`). `auto` choisit seul.
+`--backend` : `vllm` (serveur, KV cache, rapide — Qwen3.5 inclus depuis la stack v2)
+ou `hf` (HuggingFace in-process, lent mais universel, repli sans serveur ;
+`--no-thinking` pour Qwen3/3.5). `auto` choisit seul.
 
-vLLM est opérationnel sur ce serveur (glibc 2.28) grâce à la version 0.9.1 manylinux1 du mirror
-Criteo PyPI + 2 patches Python. Voir `docs/hebdo/5juin/session_2026-06-01.md` pour les détails.
+Depuis la migration VM (glibc 2.39, 2026-07-22), la stack v2 utilise une vLLM récente
+standard — les archis récentes (Qwen3.5…) sont servables. Pour servir avec l'env v2 :
+`PYTHON=/tmp/envs/agentgym-rl-v2/bin/python bash src/utils/start_vllm_server.sh <modèle>`.
+(Historique glibc 2.28 / vLLM 0.9.1 patchée : `docs/hebdo/5juin/session_2026-06-01.md`.)
 
 ```bash
 # Étape 1 — lancer le serveur vLLM sur le checkpoint à évaluer (backend vllm seulement)
@@ -136,12 +140,15 @@ nohup python src/train/train_grpo.py \
     > logs/<run_name>.log 2>&1 &
 ```
 
-**Paramètres clés actuels** (validés sur B200, ne pas changer sans raison) :
+**Paramètres clés actuels** (stack v2 validée par smokes le 2026-07-22) :
 - `--full-ft` : full fine-tuning (pas LoRA)
-- `--use-vllm-inprocess` : vLLM in-process avec KV cache (×6 vs HF generate)
-- `optim=adamw_bnb_8bit` : 8-bit Adam (libère ~18 Go vs fp32 Adam)
-- `gpu_memory_utilization=0.17` pour vLLM (marge suffisante pour les saves checkpoint ~8.4 Go)
-- `attn_implementation=sdpa` : attention optimisée PyTorch (flash-attn bloqué par glibc 2.28)
+- `--use-vllm-inprocess` : moteur vLLM colocate GÉRÉ PAR TRL — sync des poids EN MÉMOIRE
+  par TRL à chaque step (PEFT inclus), plus d'écriture disque ni de recréation de moteur
+- `optim=adamw_bnb_8bit` : 8-bit Adam (libère ~18 Go vs fp32 Adam) — auto en full-ft
+- `--vllm-gpu-util 0.17` : marge validée sur B200 pour le 3B
+- `attn_implementation=flash_attention_2` (défaut ; `--attn-implementation sdpa` = ancien repli)
+- `vllm_importance_sampling_correction=False` figé dans le code : parité de sémantique avec la
+  lignée exp10/19 (on-policy ratio ≡ 1) — à réactiver seulement comme ablation contrôlée
 
 ## Philosophie de travail avec Claude
 

@@ -2,9 +2,9 @@
 
 `run_test_eval` réplique le protocole d'eval offline (src/eval/eval_textcraft.py) —
 même dataset, même bootstrap de messages, cap 30 tours, temperature 1.0 — pour que
-les scores soient comparables. Pure inférence via le moteur vLLM in-process (poids
-du step courant, déjà synchronisés par VllmSyncCallback) : ces épisodes ne passent
-jamais par rollout_func ni par la loss, le test set n'est donc jamais appris.
+les scores soient comparables. Pure inférence via le moteur vLLM colocate de TRL
+(poids du step courant, poussés par vllm_engine.sync_before_eval) : ces épisodes ne
+passent jamais par rollout_func ni par la loss, le test set n'est donc jamais appris.
 
 `TestEvalCallback` orchestre l'éval périodique et écrit le MEILLEUR checkpoint sur
 le disque home persistant (pas /tmp volatil) — leçon des 3 coupures infra de juin.
@@ -37,14 +37,15 @@ EVAL_DEPTH_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test_with_depth.json"
 EVAL_MAX_ROUNDS = 30  # protocole d'éval, distinct de schedules.MAX_SIM_ROUNDS=20 (training)
 
 
-def run_test_eval(tokenizer: Any, max_items: int = 0,
+def run_test_eval(llm: Any, tokenizer: Any, max_items: int = 0,
                   temperature: float = 1.0, max_tokens: int = 512,
                   fewshot_block: str | None = None,
                   fewshot_messages: list[dict] | None = None) -> dict[str, float]:
-    """Pass@1 sur le test set via le moteur vLLM in-process (poids du step courant).
+    """Pass@1 sur le test set via le moteur vLLM colocate (poids du step courant).
 
-    Retourne les métriques globales + par depth + par type d'erreur (préfixées
-    eval/ par le callback avant log wandb)."""
+    llm : le moteur vLLM brut (vllm_engine.get_engine(trainer)), synchronisé au
+    préalable par vllm_engine.sync_before_eval. Retourne les métriques globales
+    + par depth + par type d'erreur (préfixées eval/ par le callback)."""
     from vllm import SamplingParams
 
     etypes = [e[0] for e in ERROR_PATTERNS]
@@ -86,7 +87,7 @@ def run_test_eval(tokenizer: Any, max_items: int = 0,
                 tokenizer.apply_chat_template(states[i], tokenize=False, add_generation_prompt=True)
                 for i in active
             ]
-            outputs = vllm_engine.LLM_ENGINE.generate(prompts, sampling_params, use_tqdm=False)
+            outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
             texts = [out.outputs[0].text for out in outputs]
 
             def env_step(pair: tuple[int, int]) -> Any:
@@ -135,8 +136,9 @@ def run_test_eval(tokenizer: Any, max_items: int = 0,
 class TestEvalCallback(TrainerCallback):
     """Éval test set périodique + sauvegarde du MEILLEUR checkpoint.
 
-    À enregistrer APRÈS VllmSyncCallback : à on_step_end, le moteur vLLM contient
-    déjà les poids du step courant.
+    Synchronise lui-même les poids du step courant dans le moteur vLLM de TRL
+    (sync_before_eval) avant d'évaluer — TRL ne synchronise que paresseusement
+    au début du step suivant.
 
     Quand le Pass@1 test s'améliore (>= : à score égal on garde le checkpoint le
     plus RÉCENT → reprise moins coûteuse), le checkpoint est écrit dans
@@ -166,7 +168,11 @@ class TestEvalCallback(TrainerCallback):
         t0 = time.time()
         print(f"[test_eval] step {state.global_step} — éval test set en cours...", flush=True)
         try:
-            metrics = run_test_eval(self.trainer_ref.processing_class, max_items=self.eval_items,
+            # TRL synchronise les poids paresseusement (au début du step suivant) ;
+            # à on_step_end le moteur tient encore les poids d'AVANT l'update → sync forcée.
+            vllm_engine.sync_before_eval(self.trainer_ref)
+            metrics = run_test_eval(vllm_engine.get_engine(self.trainer_ref),
+                                    self.trainer_ref.processing_class, max_items=self.eval_items,
                                     fewshot_block=self.fewshot_block,
                                     fewshot_messages=self.fewshot_messages)
         except Exception as e:

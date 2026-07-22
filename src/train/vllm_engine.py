@@ -1,65 +1,52 @@
-"""Moteur vLLM in-process : génération des rollouts + synchronisation des poids.
+"""Accès au moteur vLLM géré par TRL (mode colocate) + utilitaires de sauvegarde.
 
-TRL ne sait pas qu'on génère avec vLLM (use_vllm=False dans GRPOConfig) : on
-maintient nous-mêmes un moteur vLLM dans le process et on y recharge les poids
-TRL à CHAQUE step (comme le hybrid engine de verl) pour rester on-policy.
-vLLM 0.9.1 V1 tourne dans un sous-process (SyncMPClient) : pas de copie mémoire
-directe possible → save state_dict sur disque, destruction et recréation du moteur.
-Overhead ~15 s/step, négligeable devant le rollout de 64+ épisodes.
+Historique (migration 2026-07-22) : jusqu'à TRL 1.4.0 / vLLM 0.9.1 (contrainte
+glibc 2.28 de l'ancienne VM), ce module gérait SON PROPRE moteur vLLM in-process :
+initialisation manuelle, et surtout synchronisation des poids par écriture du
+modèle complet (~5,8 Go) sur /tmp puis destruction/recréation du moteur à chaque
+step (~15-20 s, ≈20-25 % du temps de step mesuré sur exp19). TRL ≥ 1.9.0 gère
+nativement ce cas : avec GRPOConfig(use_vllm=True, vllm_mode="colocate"), il
+construit le moteur dans le process ET synchronise les poids EN MÉMOIRE
+(merge_adapter → push des tenseurs dans vLLM → unmerge → reset du prefix cache),
+automatiquement avant chaque appel à rollout_func (grpo_trainer.py:2151-2153).
 
-Tout l'état module (moteur, dossier modèle d'origine, compteurs d'échec) vit ici
-et nulle part ailleurs. `LLM_ENGINE is None` = génération HF pure (cas des archis
-que vLLM 0.9.1 ne sert pas, ex. Qwen3.5).
+Ce module ne fait donc plus que :
+  - exposer le moteur TRL (get_engine) pour la boucle multi-tour et l'éval ;
+  - générer un tour (generate_round) — même logique/logprobs qu'avant, le moteur
+    TRL en dessous ;
+  - forcer une sync avant l'éval périodique (sync_before_eval) : TRL synchronise
+    paresseusement au DÉBUT du step suivant, or TestEvalCallback évalue à
+    on_step_end — sans sync explicite, l'éval verrait les poids d'avant l'update ;
+  - écrire un modèle HF complet servable (save_model_for_vllm), pour la
+    sauvegarde finale et le best full-ft (indépendant du moteur).
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import torch
-from transformers import TrainerCallback
-
-# Moteur vLLM in-process (None = generation HF via trainer._generate_single_turn).
-LLM_ENGINE: Any = None
-# Dossier du modèle d'ORIGINE, pour recopier les fichiers tokenizer à chaque sync.
-# Ne PAS le lire depuis le moteur : après la 1re sync, le dossier du moteur EST
-# /tmp/vllm_weight_sync, et copier les tokenizer sur eux-mêmes lève SameFileError
-# — ce qui avortait silencieusement toutes les syncs suivantes (bug qui a figé
-# vLLM sur les poids du step 1 pendant tout exp7.2/début 7.3).
-BASE_MODEL_DIR: str = ""
-
-_SYNC_STEP_COUNT = 0
-_SYNC_CONSECUTIVE_FAILURES = 0   # re-raise après N échecs consécutifs
-_SYNC_MAX_FAILURES = 3           # 1 transitoire ok ; 3 = problème structurel → crash propre
-_WEIGHT_TMP = "/tmp/vllm_weight_sync"
 
 
-def init_engine(model_path: str, gpu_memory_utilization: float = 0.17,
-                max_model_len: int = 16384) -> None:
-    """Charge le moteur vLLM in-process sur le modèle de départ.
+def get_engine(trainer: Any) -> Any:
+    """Le moteur vLLM brut (objet vllm.LLM) géré par TRL en colocate, ou None.
 
-    gpu_memory_utilization=0.17 : 0.20 laissait trop peu de marge pendant les
-    saves de checkpoint (~8 GiB) sur B200."""
-    global LLM_ENGINE, BASE_MODEL_DIR
-    from vllm import LLM
-    BASE_MODEL_DIR = model_path
-    print(f"[vllm] Chargement vLLM in-process depuis {model_path} ...", flush=True)
-    LLM_ENGINE = LLM(
-        model=model_path,
-        dtype="bfloat16",
-        gpu_memory_utilization=gpu_memory_utilization,
-        max_model_len=max_model_len,
-        enable_prefix_caching=True,
-        trust_remote_code=True,
-    )
-    print("[vllm] vLLM prêt.", flush=True)
+    None = pas de vLLM (use_vllm=False) → generation HF via
+    trainer._generate_single_turn (archis non servables, smoke tests CPU-ish)."""
+    gen = getattr(trainer, "vllm_generation", None)
+    return getattr(gen, "llm", None) if gen is not None else None
 
 
-def generate_round(tokenizer: Any, states: list, active: list[int],
+def generate_round(trainer: Any, tokenizer: Any, states: list, active: list[int],
                    max_tokens: int) -> tuple[list[list[int]], list[list[float]]]:
-    """Génère un tour pour tous les épisodes actifs (batch unique, prefix caching)."""
+    """Génère un tour pour tous les épisodes actifs (batch unique, prefix caching).
+
+    Utilise le moteur TRL directement avec nos propres SamplingParams (logprobs=1
+    pour récupérer la logprob du token choisi), plutôt que
+    trainer.vllm_generation.generate() dont le format de logprobs (liste par token)
+    diffère de notre contrat (un float par token)."""
     from vllm import SamplingParams
+    llm = get_engine(trainer)
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
         temperature=1.0,
@@ -70,7 +57,7 @@ def generate_round(tokenizer: Any, states: list, active: list[int],
         tokenizer.apply_chat_template(states[i], tokenize=False, add_generation_prompt=True)
         for i in active
     ]
-    outputs = LLM_ENGINE.generate(prompts, sampling_params, use_tqdm=False)
+    outputs = llm.generate(prompts, sampling_params, use_tqdm=False)
     ids_list, lps_list = [], []
     for out in outputs:
         comp = out.outputs[0]
@@ -79,6 +66,16 @@ def generate_round(tokenizer: Any, states: list, active: list[int],
         ids_list.append(ids)
         lps_list.append(lps)
     return ids_list, lps_list
+
+
+def sync_before_eval(trainer: Any) -> None:
+    """Pousse les poids du step courant dans le moteur vLLM avant une éval à on_step_end.
+
+    TRL ne synchronise que paresseusement (au début du _generate suivant, quand
+    global_step a changé). On force la sync ici, puis on marque le step comme déjà
+    chargé pour éviter une re-sync inutile au rollout suivant."""
+    trainer.vllm_generation.sync_weights()
+    trainer._last_loaded_step = trainer.state.global_step
 
 
 def save_model_for_vllm(trl_model: Any, out_dir: str) -> None:
@@ -90,7 +87,7 @@ def save_model_for_vllm(trl_model: Any, out_dir: str) -> None:
       les poids de base (merge_adapter), on extrait un state_dict aux clés Qwen2 propres
       (sans préfixe 'base_model.model.' ni matrices 'lora_'), on l'écrit en safetensors avec
       la config du modèle de base, puis on défusionne (unmerge_adapter) pour ne PAS altérer
-      l'état d'entraînement. C'est la même logique que TRL `_move_model_to_vllm`."""
+      l'état d'entraînement."""
     is_peft = hasattr(trl_model, "merge_adapter") and hasattr(trl_model, "unmerge_adapter")
     if not is_peft:
         trl_model.save_pretrained(out_dir)
@@ -125,67 +122,3 @@ def save_model_for_vllm(trl_model: Any, out_dir: str) -> None:
         save_file(clean, os.path.join(out_dir, "model.safetensors"), metadata={"format": "pt"})
     finally:
         trl_model.unmerge_adapter()
-
-
-def sync_trl_to_vllm(trl_model: Any) -> None:
-    """Recharge le moteur vLLM avec les poids TRL du step courant (à chaque step).
-
-    Un échec de sync est TRÈS visible dans le log (leçon du SameFileError silencieux) ;
-    au 3e échec consécutif on crashe proprement plutôt que de continuer un run
-    off-policy sans le savoir."""
-    global _SYNC_STEP_COUNT, _SYNC_CONSECUTIVE_FAILURES, LLM_ENGINE
-
-    if LLM_ENGINE is None:  # génération HF pure (archi non servable par vLLM)
-        return
-
-    _SYNC_STEP_COUNT += 1
-    try:
-        import shutil
-        from vllm import LLM
-        print(f"[vllm_sync] step {_SYNC_STEP_COUNT} — sauvegarde poids TRL vers {_WEIGHT_TMP}", flush=True)
-        save_model_for_vllm(trl_model, _WEIGHT_TMP)  # full-ft: save direct ; LoRA: merge->save->unmerge
-        # Fichiers tokenizer recopiés depuis le dossier d'ORIGINE (stable entre syncs).
-        src_dir = Path(BASE_MODEL_DIR or LLM_ENGINE.llm_engine.model_config.model)
-        if src_dir.resolve() != Path(_WEIGHT_TMP).resolve():
-            for f in src_dir.glob("tokenizer*"):
-                shutil.copy2(f, _WEIGHT_TMP)
-        print("[vllm_sync] Rechargement vLLM avec nouveaux poids...", flush=True)
-
-        # Réutilise les paramètres du moteur courant pour la recréation.
-        vllm_config = LLM_ENGINE.llm_engine.vllm_config
-        gpu_util = vllm_config.cache_config.gpu_memory_utilization
-        max_len = vllm_config.model_config.max_model_len
-        del LLM_ENGINE
-        LLM_ENGINE = None
-        torch.cuda.empty_cache()
-        LLM_ENGINE = LLM(
-            model=_WEIGHT_TMP,
-            dtype="bfloat16",
-            gpu_memory_utilization=gpu_util,
-            max_model_len=max_len,
-            enable_prefix_caching=True,
-            trust_remote_code=True,
-        )
-        print(f"[vllm_sync] vLLM rechargé avec les poids du step {_SYNC_STEP_COUNT}.", flush=True)
-        _SYNC_CONSECUTIVE_FAILURES = 0  # succès → reset compteur
-    except Exception as e:
-        _SYNC_CONSECUTIVE_FAILURES += 1
-        print(
-            f"[vllm_sync] !!! SYNC ÉCHOUÉE (échec {_SYNC_CONSECUTIVE_FAILURES}/{_SYNC_MAX_FAILURES}) "
-            f"step {_SYNC_STEP_COUNT}: {e!r} — vLLM génère avec des poids FIGÉS.",
-            flush=True,
-        )
-        if _SYNC_CONSECUTIVE_FAILURES >= _SYNC_MAX_FAILURES:
-            raise RuntimeError(
-                f"[vllm_sync] {_SYNC_MAX_FAILURES} syncs consécutives échouées — "
-                f"arrêt pour éviter un run off-policy silencieux."
-            ) from e
-
-
-class VllmSyncCallback(TrainerCallback):
-    """Après chaque optimizer step, resynchronise les poids TRL → moteur vLLM."""
-
-    def on_step_end(self, args: Any, state: Any, control: Any,
-                    model: Any = None, **kwargs: Any) -> None:
-        if model is not None:
-            sync_trl_to_vllm(model)

@@ -11,7 +11,11 @@ MODEL_PATH="${1:-models/Qwen2.5-3B-Instruct}"
 MAX_LEN="${2:-16384}"
 PORT=8001
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
-PYTHON="$HOME/envs/agentgym-rl/bin/python"
+# Env par défaut : v1 historique. Pour servir avec l'env v2 (vLLM récent, requis
+# pour Qwen3.5) : PYTHON=/tmp/envs/agentgym-rl-v2/bin/python bash src/utils/start_vllm_server.sh ...
+PYTHON="${PYTHON:-$HOME/envs/agentgym-rl/bin/python}"
+# Les sous-process vLLM V1 (EngineCore) doivent trouver ninja & co dans le PATH.
+export PATH="$(dirname "$PYTHON"):$PATH"
 
 # Chemin absolu si relatif
 if [[ "${MODEL_PATH}" != /* ]]; then
@@ -35,7 +39,7 @@ echo $! > /tmp/vllm_server.pid
 echo "[vllm] PID : $! (sauvegardé dans /tmp/vllm_server.pid)"
 echo "[vllm] Attente démarrage..."
 
-for i in $(seq 1 30); do
+for i in $(seq 1 90); do    # 3 min — le démarrage vLLM v2 (compilation JIT + CUDA graphs) dépasse souvent 60 s
     sleep 2
     if curl -s http://localhost:$PORT/health > /dev/null 2>&1; then
         echo "[vllm] Serveur prêt sur http://localhost:$PORT"

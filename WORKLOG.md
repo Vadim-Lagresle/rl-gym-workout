@@ -2294,3 +2294,26 @@ flash-attention) nécessite de valider TRL séparément — non fait, à planifi
 Artefacts sur `/tmp` (volatils) : `/tmp/envs/vllm-recent-test/` (venv, 9,4 Go),
 `/tmp/models/Qwen3.5-4B/` (poids, 8,8 Go). `/tmp` : 194 Go libres. `/home` : 2,6 Go libres
 (93 % plein) — à surveiller.
+
+## 2026-07-22 (suite) — MIGRATION STACK v2 : TRL 1.9 + vLLM 0.25.1 colocate + flash-attention
+
+Décision Vadim après la validation isolée du matin : migrer tout le pipeline. Fait et
+validé. Détail complet : `docs/hebdo/21juillet/session_2026-07-22_migration_stack_v2.md`.
+
+- **Fin du « bricolage » de sync** : `vllm_engine.py` réécrit — le moteur vLLM est
+  désormais construit et synchronisé PAR TRL (use_vllm=True, vllm_mode="colocate",
+  sync EN MÉMOIRE merge→push→unmerge, PEFT inclus) ; l'ancienne écriture de 5,8 Go/step
+  + recréation de moteur (20-25 % du temps de step) disparaît. La boucle multi-tour
+  TextCraft (rollout.py) et SNIS sont inchangées (contrat rollout_func identique).
+- **flash_attention_2 par défaut** à l'entraînement (--attn-implementation sdpa = repli).
+- **vllm_importance_sampling_correction=False figé** : parité de sémantique avec la
+  lignée exp10/19 (on-policy ratio≡1) — la correction IS de TRL 1.9 est une ablation
+  future, pas un changement silencieux.
+- **Env v2** : /tmp/envs/agentgym-rl-v2 (volatil → setup/setup_agentgym_rl_v2.sh, ~10 min,
+  wheel flash-attn conservé dans saves/wheels/). Ancien env conservé en rollback (mais
+  incompatible avec le code migré — rollback = git + vieil env). PATH du venv requis
+  (ninja pour les sous-process vLLM).
+- **Validation : 6 smokes GPU + validations à sec, tous verts** (LoRA colocate+FA2+éval
+  périodique ; full-FT+bnb ; SNIS ; few-shot k=10 ; chemin HF ; serveur v2 + eval_textcraft
+  inter-envs). Vitesse : smoke complet en 25-45 s (vs minutes avant). Aucun run LONG
+  encore — surveiller le premier de près.

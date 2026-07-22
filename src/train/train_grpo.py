@@ -15,9 +15,12 @@ l'assemblage ; la logique vit dans les modules de src/train/ :
     snis.py          recombinaison SNIS (utilisée par train_grpo_snis.py)
 
 Pré-requis :
-  - Serveur TextCraft lancé : conda activate agentenv-textcraft &&
-    textcraft --host 127.0.0.1 --port 36005
-  - Env conda agentgym-rl (B200, vLLM 0.9.1 — voir docs/hebdo/5juin/session_2026-06-01.md)
+  - Serveur TextCraft lancé : source ~/envs/agentenv-textcraft/bin/activate &&
+    cd external/AgentGym/agentenv-textcraft && textcraft --host 127.0.0.1 --port 36005
+  - Env v2 (TRL>=1.9 / vLLM>=0.25 / flash-attn — migration 2026-07-22) :
+    /tmp/envs/agentgym-rl-v2, reconstructible via setup/setup_agentgym_rl_v2.sh.
+    L'ancien env (~/envs/agentgym-rl, TRL 1.4/vLLM 0.9.1) ne peut PLUS exécuter ce
+    script (champs GRPOConfig v2) — rollback possible via l'historique git.
 
 Usage (commande de référence, voir CLAUDE.md ; --help pour tous les arguments) :
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
@@ -25,9 +28,10 @@ Usage (commande de référence, voir CLAUDE.md ; --help pour tous les arguments)
         --max-completion-length 512 --max-items 0 --max-steps 200 \
         --use-vllm-inprocess --run-name <run_name>
 
-Nota : --use-vllm-inprocess (moteur vLLM maison dans le process, sync de poids
-manuelle à chaque step) est le chemin actif ; --use-vllm (intégration vLLM native
-de TRL) n'est pas utilisé en pratique.
+Nota : --use-vllm-inprocess active le moteur vLLM colocate GÉRÉ PAR TRL
+(use_vllm=True, vllm_mode="colocate") — sync de poids en mémoire par TRL à
+chaque step, PEFT inclus. L'ancien moteur maison (écriture disque + recréation,
+~20-25 % du temps de step) a été retiré à la migration du 2026-07-22.
 """
 
 from __future__ import annotations
@@ -50,7 +54,6 @@ from src.train.data import DEFAULT_MODEL_PATH, DEFAULT_SYSTEM_PROMPT, REPO_ROOT,
 from src.train.diagnostics import MemDiagCallback
 from src.train.periodic_eval import TestEvalCallback
 from src.train.rollout import grpo_rollout_func, textcraft_reward
-from src.train.vllm_engine import VllmSyncCallback
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,10 +151,18 @@ def build_parser() -> argparse.ArgumentParser:
                              "ni le modèle final dans out_dir. Seul le callback d'éval sauve "
                              "<run>_best, et uniquement quand le Pass@1 test s'améliore. "
                              "Évite de saturer le disque et de perdre le best (cf. exp10.3).")
-    parser.add_argument("--use-vllm", action="store_true", default=False)
     parser.add_argument("--use-vllm-inprocess", action="store_true", default=False,
-                        help="Use in-process vLLM for generation (faster, prefix caching). "
-                             "Requires vllm installed. Weights synced to vLLM after each step.")
+                        help="Moteur vLLM colocate GÉRÉ PAR TRL (use_vllm=True, vllm_mode='colocate') : "
+                             "génération rapide avec prefix caching, poids synchronisés EN MÉMOIRE "
+                             "par TRL à chaque step (PEFT inclus). Requiert TRL>=1.9 / vLLM>=0.25 "
+                             "(env v2 : setup/setup_agentgym_rl_v2.sh). Sans ce flag : génération HF.")
+    parser.add_argument("--vllm-gpu-util", type=float, default=0.17,
+                        help="gpu_memory_utilization du moteur vLLM colocate (0.17 validé sur B200 "
+                             "pour le 3B : laisse la marge aux saves de checkpoints)")
+    parser.add_argument("--attn-implementation", choices=["flash_attention_2", "sdpa"],
+                        default="flash_attention_2",
+                        help="Implémentation d'attention du modèle TRL (défaut : flash_attention_2, "
+                             "débloqué par la migration VM glibc 2.39 ; sdpa = ancien repli)")
     parser.add_argument(
         "--resume-from-checkpoint",
         type=str,
@@ -217,10 +228,11 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
     if not model_path.is_absolute():
         model_path = REPO_ROOT / model_path
 
-    if args.use_vllm_inprocess:
-        vllm_engine.init_engine(str(model_path), max_model_len=args.vllm_max_len)
-
-    print(f"[train] Model: {model_path}", flush=True)
+    # Le moteur vLLM est désormais construit et synchronisé PAR TRL (use_vllm=True,
+    # vllm_mode="colocate" dans GRPOConfig ci-dessous) — plus d'init manuelle ici.
+    print(f"[train] Model: {model_path}"
+          + (" — vLLM colocate géré par TRL" if args.use_vllm_inprocess else " — génération HF"),
+          flush=True)
 
     check_server()
     prompts_per_step = args.gradient_accumulation_steps // args.num_generations
@@ -295,7 +307,20 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         # (sum / total_tokens) matches verl's masked_mean closer than loss_type="grpo"
         # (per-sequence mean), pinned here for reproducibility across TRL versions.
         loss_type="dapo",
-        use_vllm=args.use_vllm,
+        # Moteur vLLM colocate GÉRÉ PAR TRL (migration 2026-07-22, TRL>=1.9 requis) :
+        # TRL construit le moteur dans le process et synchronise les poids EN MÉMOIRE
+        # (merge->push->unmerge, PEFT inclus) avant chaque rollout_func — remplace
+        # l'ancien vllm_engine maison (écriture 5.8 Go/step + recréation moteur).
+        use_vllm=args.use_vllm_inprocess,
+        vllm_mode="colocate",
+        vllm_gpu_memory_utilization=args.vllm_gpu_util,
+        vllm_max_model_length=args.vllm_max_len,
+        # Parité avec la lignée exp10/exp19 (TRL 1.4 : use_vllm=False → pas de
+        # correction IS, ratio ≡ 1 en on-policy). La correction IS de TRL 1.9
+        # utiliserait nos logprobs de rollout (0.0 sur les tokens template/obs
+        # masqués) comme logprobs d'échantillonnage → sémantique différente.
+        # À réactiver un jour comme ablation contrôlée, pas par accident.
+        vllm_importance_sampling_correction=False,
         # --num-epochs > 0 => piloter par epochs (max_steps=-1), sinon par max_steps.
         max_steps=(-1 if args.num_epochs > 0 else args.max_steps),
         num_train_epochs=(args.num_epochs if args.num_epochs > 0 else 3),
@@ -314,7 +339,9 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         eval_strategy="no",
         gradient_checkpointing=True,
         model_init_kwargs={"dtype": "bfloat16", "low_cpu_mem_usage": True,
-                           "attn_implementation": "sdpa"},   # flash_attn bloqué (glibc 2.28 < 2.32)
+                           # flash_attention_2 débloqué par la migration VM glibc 2.39
+                           # (2026-07-22) ; sdpa reste dispo via --attn-implementation.
+                           "attn_implementation": args.attn_implementation},
     )
 
     peft_config = None if args.full_ft else LoraConfig(
@@ -329,16 +356,13 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         print("[train] Full fine-tuning (no LoRA).", flush=True)
 
     callbacks = [MemDiagCallback()]
-
-    if args.use_vllm_inprocess:
-        callbacks.append(VllmSyncCallback())
-        print("[vllm] VllmSyncCallback enregistré.", flush=True)
+    # (Plus de VllmSyncCallback : la sync par step est faite nativement par TRL,
+    #  et TestEvalCallback force sa propre sync avant chaque éval.)
 
     test_eval_cb = None
     if args.eval_every > 0:
         if not args.use_vllm_inprocess:
             raise SystemExit("--eval-every nécessite --use-vllm-inprocess (le moteur vLLM sert aussi à l'éval)")
-        # Enregistré APRÈS VllmSyncCallback : à on_step_end le moteur a les poids du step.
         test_eval_cb = TestEvalCallback(eval_every=args.eval_every, eval_items=args.eval_items,
                                         best_init_score=args.best_init_score, run_name=args.run_name,
                                         fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
