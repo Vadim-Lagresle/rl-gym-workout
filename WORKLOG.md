@@ -2253,3 +2253,44 @@ neuf** qui perdrait l'acquis. Recherche du mécanisme exact dans TRL 1.4.0 insta
 LR=1,667e-6/beta=0,01/best-init=0,45/eval-every=25 à confirmer) documenté dans
 `docs/hebdo/21juillet/session_2026-07-21_exp19_bilan_et_continuation_adapter.md` — à
 reprendre à la prochaine session.
+
+## 2026-07-22 — vLLM 0.25.1 installé et validé (isolé) : Qwen3.5-4B fonctionne enfin
+
+Rattrapage d'une découverte non documentée : une conversation antérieure (même session)
+avait établi que la VM d'entraînement a été migrée sur **CentOS Stream 10, glibc 2.39**
+(ticket Coder CODEX-3453, image EL10, appliquée le 20/07) — bien au-delà du plafond glibc
+2.28 documenté partout (`CLAUDE.md`, `docs/hebdo/5juin/`). Ce constat n'avait jamais été
+écrit ; **réparé aujourd'hui**. Note complète :
+`docs/hebdo/21juillet/session_2026-07-22_vllm_recent_qwen35_valide.md`.
+
+**Test réalisé** : installation isolée de vLLM récent, SANS toucher `~/envs/agentgym-rl`
+(le venv de production reste vLLM 0.9.1 / TRL 1.4.0 inchangé). Venv jetable entièrement
+sur `/tmp/envs/vllm-recent-test` (le home, 35 Go et déjà très plein, ne peut plus accueillir
+ce genre d'installation — la première tentative sur le home l'a rempli à 100 %, récupéré
+par `pip cache purge` + reconstruction sur `/tmp`).
+
+**Résultat** : **vLLM 0.25.1** installé, `Qwen3_5ForConditionalGeneration` confirmé présent
+dans le registre (+ toute la famille Qwen3/Qwen3VL/Qwen3Next). **Qwen3.5-4B chargé et testé
+en génération réelle** (pas juste l'import) : fonctionne, `sm100` (B200) détecté nativement
+par les kernels FlashInfer — la 0.9.1 actuelle date d'avant le support B200. **Qwen2.5-3B
+(modèle de production) testé aussi avec cette même vLLM 0.25.1** : fonctionne, pas de
+régression.
+
+Piège rencontré : `FileNotFoundError: ninja` au premier essai — le sous-process EngineCore
+de vLLM V1 ne trouvait pas `ninja` (requis par FlashInfer JIT) car le venv n'était pas sur
+le `PATH` (python appelé directement sans activation). Résolu par
+`export PATH=".../bin:$PATH"` avant lancement.
+
+**Portée du test — ce qui n'est PAS fait** : aucune migration du pipeline d'entraînement ;
+TRL 1.4.0 (qui réclame vLLM 0.12-0.18, pas 0.25.1) n'a pas été testé contre cette version ;
+le serveur HTTP OpenAI-compatible n'a pas été testé (seulement `LLM()` offline).
+
+**Implication actionnable immédiate** : les scripts d'éval de ce projet parlent au serveur
+vLLM par HTTP (`llm_chat.ChatGenerator`), indépendamment de l'environnement qui le sert —
+on peut donc dès maintenant servir Qwen3.5-4B via ce nouveau venv pour l'ÉVAL (remplace le
+fallback HF lent) sans toucher à l'entraînement. Migrer l'entraînement (bénéficier aussi de
+flash-attention) nécessite de valider TRL séparément — non fait, à planifier si souhaité.
+
+Artefacts sur `/tmp` (volatils) : `/tmp/envs/vllm-recent-test/` (venv, 9,4 Go),
+`/tmp/models/Qwen3.5-4B/` (poids, 8,8 Go). `/tmp` : 194 Go libres. `/home` : 2,6 Go libres
+(93 % plein) — à surveiller.
