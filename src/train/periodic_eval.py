@@ -152,9 +152,15 @@ class TestEvalCallback(TrainerCallback):
 
     def __init__(self, eval_every: int, eval_items: int, best_init_score: float,
                  run_name: str, fewshot_block: str | None = None,
-                 fewshot_messages: list[dict] | None = None) -> None:
+                 fewshot_messages: list[dict] | None = None,
+                 eval_fn: Any = None) -> None:
         self.eval_every = eval_every
         self.eval_items = eval_items
+        # Fonction d'éval interchangeable (même signature que run_test_eval) :
+        # le mode plan (exp21, rollout_plan.run_plan_test_eval) évalue en
+        # single-turn avec le protocole de SON training ; le save-best et le
+        # logging eval/ restent identiques.
+        self.eval_fn = eval_fn or run_test_eval
         self.best_score = best_init_score  # -1 => le 1er eval sauve toujours
         # Best TOUJOURS sur le disque home persistant, quel que soit --output-root.
         self.best_dir = str(REPO_ROOT / "saves" / "trl_grpo" / f"{run_name}_best")
@@ -171,10 +177,10 @@ class TestEvalCallback(TrainerCallback):
             # TRL synchronise les poids paresseusement (au début du step suivant) ;
             # à on_step_end le moteur tient encore les poids d'AVANT l'update → sync forcée.
             vllm_engine.sync_before_eval(self.trainer_ref)
-            metrics = run_test_eval(vllm_engine.get_engine(self.trainer_ref),
-                                    self.trainer_ref.processing_class, max_items=self.eval_items,
-                                    fewshot_block=self.fewshot_block,
-                                    fewshot_messages=self.fewshot_messages)
+            metrics = self.eval_fn(vllm_engine.get_engine(self.trainer_ref),
+                                   self.trainer_ref.processing_class, max_items=self.eval_items,
+                                   fewshot_block=self.fewshot_block,
+                                   fewshot_messages=self.fewshot_messages)
         except Exception as e:
             # Télémétrie pure : un échec d'éval ne doit pas tuer le run — mais il
             # doit être impossible à rater dans le log (leçon du sync silencieux).

@@ -1,0 +1,84 @@
+name: exp20_staged_lr_v2
+date: 2026-07-23
+description: >
+  Double objectif : (1) PREMIER RUN LONG sur la stack v2 (TRL 1.9 + vLLM 0.25.1
+  colocate + flash-attention, migration du 2026-07-22 validée jusqu'ici par 6
+  smokes d'un step) — test d'endurance de la sync en mémoire sur des centaines
+  de steps ; (2) rejouer exp19.2 (from scratch, Qwen2.5-3B nu, GRPO LoRA,
+  few-shot k=10) avec un SCHEDULE DE PALIERS : LR et beta KL divisés par 3
+  toutes les 3 epochs (StagedLrBetaCallback, nouveau dans schedules.py).
+  Le schedule automatise en un seul run l'échelle de LR que la lignée exp10
+  faisait à la main par warm-starts (5e-6 → 3.33e-6 → …), et protège du
+  collapse KL d'exp19.2 : celui-ci est survenu à l'epoch ~7.5 ENCORE à 5e-6 —
+  ici le LR sera déjà à ~5.6e-7 à ce stade.
+
+algorithm: GRPO (TRL 1.9 + vLLM 0.25.1 colocate), LoRA r=16/α=32, few-shot k=10, paliers LR/beta ÷3 / 3 epochs
+model: models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu
+script: src/train/train_grpo.py --fewshot 10 --lr-stage-every-epochs 3
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2 (setup/setup_agentgym_rl_v2.sh)
+wandb: 9fc7abct   # https://wandb.ai/v-lagresle-criteo/rl-gym-workout/runs/9fc7abct — lancé 2026-07-23, PID 2010377, 966 steps prévus
+
+training:
+  fine_tuning: LoRA
+  num_generations: 8
+  gradient_accumulation_steps: 64   # 64 traj/step, 8 prompts/step
+  max_completion_length: 512
+  num_epochs: 21                    # ≈ 980 steps (374 items / 8 prompts/step ≈ 47 steps/epoch)
+  learning_rate: 5e-6               # palier 0 ; ÷3 toutes les 3 epochs (7 paliers)
+  beta_kl: 0.01                     # palier 0 ; suit le LR (÷3 aux mêmes paliers — décision Vadim 23/07)
+  lr_stage_every_epochs: 3
+  lr_stage_factor: 3
+  attn_implementation: flash_attention_2   # défaut stack v2
+  fewshot: 10                       # mêmes exemples fixes qu'exp18/19 (format dialogue)
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47                    # ~1 checkpoint/epoch
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs   # checkpoints resumables sur l'overlay ; le best adapter va sur le home
+
+paliers_prevus:                     # LR / beta par tranche de 3 epochs (~140 steps)
+  epochs_0_3:   { lr: 5.00e-6, beta: 1.00e-2 }   # régime exp10.3/exp19.2 (apprentissage)
+  epochs_3_6:   { lr: 1.67e-6, beta: 3.33e-3 }
+  epochs_6_9:   { lr: 5.56e-7, beta: 1.11e-3 }   # ~régime polissage exp10.8
+  epochs_9_12:  { lr: 1.85e-7, beta: 3.70e-4 }
+  epochs_12_15: { lr: 6.17e-8, beta: 1.23e-4 }
+  epochs_15_18: { lr: 2.06e-8, beta: 4.12e-5 }
+  epochs_18_21: { lr: 6.86e-9, beta: 1.37e-5 }
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --num-epochs 21 --learning-rate 5e-6 --beta 0.01
+    --lr-stage-every-epochs 3 --lr-stage-factor 3
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp20_staged_lr_v2
+    > logs/exp20_staged_lr_v2.log 2>&1 &
+
+references_pour_lecture:
+  base_fewshot_k10_sans_RL: 30/100
+  exp19_2_meme_recette_LR_constant: "26→45 @ step 300 puis collapse KL (350-450)"
+  objectif_1: "pas de collapse (le palier epoch 3 doit couper la dérive avant l'epoch ~7.5)"
+  objectif_2: "dépasser 45 (best exp19.2) — les paliers doivent consolider au lieu de diverger"
+  objectif_stack: "sync colocate stable sur ~980 steps, vitesse/step vs 246 s/it d'exp19.2"
+
+surveillance:
+  - "lignes [lr-beta-stage] dans le log aux epochs 0/3/6/… (7 attendues)"
+  - "kl sur wandb : régime sain ~0.0008 ; dérive soutenue > 0.05 = alerte (cf. exp19.2)"
+  - "completions/mean_length : doublement = signal parallèle de collapse"
+  - "vitesse : s/it vs 246 s/it d'exp19.2 (gain attendu de la sync en mémoire)"
+
+observations_lancement:   # 2026-07-23, premiers steps
+  premier_rollout: 24/64 récompensés (≈ baseline promptée 30% — exp19.2 avait démarré à 23/64)
+  vitesse: "47.3 s/it vs 246 s/it (exp19.2, ancienne stack) → ×5.2, ETA ~12h40 pour 966 steps"
+  kl_step2: 0.00078 (régime sain)
+  completions_mean_length: 616-651 tokens (idem phase saine exp19.2)
+
+results: ~
+verdict: ~

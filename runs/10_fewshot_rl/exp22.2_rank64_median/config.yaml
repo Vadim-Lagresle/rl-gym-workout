@@ -1,0 +1,107 @@
+name: exp22.2_rank64_median
+date: 2026-07-29
+description: >
+  Deux leviers par rapport à exp22.1. (1) CAPACITÉ : rang LoRA 16 → 64 (alpha
+  32 → 128, ratio 2 conservé) — toutes les variantes de schedule (exp19.2, 20,
+  22, 22.1) plafonnent au même niveau (reward train ~0.47-0.50, test ~45-55),
+  ce qui pointe vers un mur de capacité/exploration plus que d'optimisation ;
+  on teste le volet capacité. (2) CRITÈRE ADAPTATIF DURCI — autopsie exp22.1 :
+  7 coupes pilotées par le bruit (référence = max de fenêtres bruitées, biaisé
+  +1-2σ ; eps 0.005 alors que le bruit inter-fenêtres mesuré politique GELÉE est
+  ±0.015-0.02 ; coupes à la cadence minimale 2.5 ep), LR au plancher 2.3e-9 dès
+  l'epoch 28 puis 18 epochs brûlées à LR≈0. Correctifs : référence = MÉDIANE
+  des 5 derniers checks du palier (le max ne sert plus qu'au save du best),
+  eps = 0.02 (~2σ mesuré), chaque palier de LR dure AU MOINS 3 epochs (coupe
+  retenue si déclenchée avant — vraies mesures stables par palier, demande
+  Vadim), plancher RÉALISTE 1e-7 qui ARRÊTE le run au lieu de tourner à vide.
+  (3) Le best train sauve désormais AUSSI l'état Adam (optimizer.pt, fp32) et
+  le restaure à la coupe : poids + moments cohérents, et reprise exacte après
+  coupure infra (politique disque du 2026-07-29 : le home ne garde QUE les
+  best + optimizers ; modèle de base retéléchargeable sur /tmp).
+
+algorithm: GRPO (TRL 1.9 + vLLM colocate), LoRA r=64/α=128, few-shot k=10, LR adaptatif (réf médiane, palier ≥3 ep, restore best train + optimizer)
+model: /tmp/models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu (setup/ensure_qwen_tmp.sh)
+script: src/train/train_grpo.py --lora-r 64 --fewshot 10 --lr-adaptive --lr-adaptive-restore-best --lr-adaptive-save-optimizer
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2 (reconstruit 2026-07-29, base pyenv 3.11.7)
+wandb: r0ajb8n6   # lancé 2026-07-29 ~12:20, PID 19584 — https://wandb.ai/v-lagresle-criteo/rl-gym-workout/runs/r0ajb8n6
+
+training:
+  fine_tuning: LoRA r=64 alpha=128 (vs 16/32 lignée exp10-22.1) — adapter ~460 Mo
+  num_generations: 8
+  gradient_accumulation_steps: 64   # 64 traj/step, 8 prompts/step
+  max_completion_length: 512
+  num_epochs: 100                   # borne haute — l'arrêt réel = stop_at_floor (ou stop manuel)
+  learning_rate: 5e-6
+  beta_kl: 0.01
+  lr_adaptive: true
+  lr_adaptive_restore_best: true
+  lr_adaptive_save_optimizer: true  # optimizer.pt (~2x adapter) avec le best, restauré à la coupe
+  lr_adaptive_window_epochs: 1.0
+  lr_adaptive_check_every_epochs: 0.5
+  lr_adaptive_patience: 3
+  lr_adaptive_eps: 0.02             # ~2σ du bruit inter-fenêtres MESURÉ (exp22.1 epochs 28-46, politique gelée)
+  lr_adaptive_ref_median_k: 5       # référence = médiane des 5 derniers checks (plus de ratchet max)
+  lr_adaptive_min_stage_epochs: 3   # palier de LR ≥ 3 epochs (coupe retenue sinon)
+  lr_adaptive_min_lr: 1e-7          # plancher réaliste…
+  lr_adaptive_stop_at_floor: true   # …qui ARRÊTE le run (5e-6 → 3 coupes max → 1.85e-7 → stop)
+  attn_implementation: flash_attention_2
+  fewshot: 10
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs   # volatil (purgé le 29/07 !) — la reprise fiable = besttrain+optimizer sur le home
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --lora-r 64
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --num-epochs 100 --learning-rate 5e-6 --beta 0.01
+    --lr-adaptive --lr-adaptive-restore-best --lr-adaptive-save-optimizer
+    --lr-adaptive-eps 0.02 --lr-adaptive-ref-median-k 5
+    --lr-adaptive-min-stage-epochs 3
+    --lr-adaptive-min-lr 1e-7 --lr-adaptive-stop-at-floor
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp22.2_rank64_median
+    > logs/exp22.2_rank64_median.log 2>&1 &
+
+references_pour_lecture:
+  exp20_paliers_calendaires: "58/100 @ step 800 (1 éval, bruit σ≈5 pts) — référence à battre"
+  exp22.1_adaptatif_restore: "53/100 @ step 850 ; coupes sur bruit → LR≈0 dès l'epoch 28"
+  objectif_1: "le rang 64 doit pousser le reward train AU-DELÀ du plafond ~0.47-0.50 commun à toutes les variantes r=16 — sinon le mur n'est pas la capacité LoRA"
+  objectif_2: "≤ 1 coupe par vraie stagnation (lignes >>> COUPE rares, précédées d'une vraie décroissance de la médiane) ; zéro coupe dans les 3 premières epochs de chaque palier"
+  objectif_3: "fin de run par PLANCHER (arrêt propre) ou stop manuel — plus jamais 18 epochs à LR≈0"
+
+surveillance:
+  - "lignes [reward-adaptive-lr] : 'coupe retenue' = signal avant min_stage_epochs ; '>>> COUPE' + 'poids RESTAURÉS' + 'moments Adam restaurés (état du best)'"
+  - "saves/trl_grpo/exp22.2_rank64_median_besttrain/ : adapter (~460 Mo) + optimizer.pt (~2x) + .besttrain_info"
+  - "VRAM : r=64 ajoute ~4x de params entraînables (~120M) + moments fp32 — marge large sur B200"
+  - "~47-50 s/it attendu"
+
+results:
+  stopped: "2026-07-29 ~19:00 — arrêt manuel à step 671/4600 (epoch ~14.5, ~7 h)"
+  best_test: "47/100 @ step 50 — jamais rebattu (adapter → saves/keep_best/exp22.2_rank64_median_best)"
+  test_trajectory: "47 @ 50 → chute à 25 @ 150 → plateau bruité 26-45, ~35 en fin de run"
+  train_reward: "rolling mean : pic 0.44 (epoch ~6) → oscille 0.33-0.39 — SOUS le plafond r=16 (~0.47-0.50)"
+  coupes: "3 coupes ÷3 (epochs 3.5, 8.5, 12.0) avec restore poids+optimizer OK → LR 1.85e-7"
+  instabilite: "spike KL ~12 000 / grad_norm ~214 000 vers l'epoch 3 (steps 115-119), résorbé mais dégâts faits (test 47→25)"
+  depths: "d1 0.74, d2 0.29, d3 0, d4 0 — mur depth≥3 identique aux runs r=16"
+
+verdict: >
+  Échec informatif : r=64 avec le régime r=16 (LR 5e-6, beta 0.01) est TROP
+  agressif — 4x plus de paramètres entraînables à même LR par paramètre =
+  l'adapter bouge ~4x plus fort par rapport à l'ancre KL. Dérive violente dès
+  l'epoch 3 (spike KL 12k, test 47→25), puis le critère adaptatif (qui a bien
+  fonctionné mécaniquement : 3 coupes avec restore poids+optimizer, palier min
+  respecté) n'a fait que stabiliser un état déjà dégradé. Le reward train
+  plafonne MOINS HAUT que r=16 (0.44 vs 0.47-0.50) et le mur depth≥3 est
+  inchangé → la capacité LoRA n'était pas le facteur limitant. Suite : exp22.3
+  = même config mais LR initial ÷4 (1.25e-6) pour découpler l'effet
+  « instabilité du départ » de l'effet « capacité ».

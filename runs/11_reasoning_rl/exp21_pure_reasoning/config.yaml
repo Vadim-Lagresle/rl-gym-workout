@@ -1,0 +1,107 @@
+name: exp21_pure_reasoning
+date: 2026-07-27
+description: >
+  Premier run RL « pure reasoning » : le modèle produit EN UNE SEULE complétion
+  le raisonnement (Thought:) puis la séquence d'actions complète (Actions:, une
+  commande TextCraft par ligne). Les actions sont parsées par regex déterministe
+  directement dans la complétion (PAS d'extracteur LLM comme en exp16 : le
+  crédit revient à 100 % aux tokens générés), rejouées TELLES QUELLES dans
+  l'environnement (aucune réparation, pas de feedback intermédiaire), et le
+  reward sparse 0/1 est rétropropagé par GRPO sur la complétion entière.
+  Config calquée sur exp20 (LoRA from scratch, few-shot k=10, paliers LR/beta
+  ÷3 / 3 epochs) avec un LR de départ un poil plus grand (7e-6 vs 5e-6 —
+  demande Vadim 27/07). Les exemples few-shot sont les MÊMES recettes résolues
+  qu'exp18/19/20, reformatées single-turn (tâche → Thought + plan complet).
+  Question scientifique : le mur depth 3-4 du multi-tour vient-il de la
+  planification (alors le single-turn devrait buter pareil) ou de la gestion
+  du dialogue long (alors le single-turn pourrait faire mieux) ?
+
+algorithm: GRPO single-turn (--plan-mode, rollout_plan.py), LoRA r=16/α=32, few-shot k=10, paliers LR/beta ÷3 / 3 epochs
+model: models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu
+script: src/train/train_grpo.py --plan-mode --fewshot 10 --lr-stage-every-epochs 3
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2 (reconstruit le 27/07 après purge /tmp)
+wandb: l4rwppam   # https://wandb.ai/v-lagresle-criteo/rl-gym-workout/runs/l4rwppam — lancé 2026-07-27, PID 397853, 966 steps prévus
+
+training:
+  fine_tuning: LoRA
+  num_generations: 8
+  gradient_accumulation_steps: 64      # 64 traj/step, 8 prompts/step
+  max_completion_length: 1024          # raisonnement + plan complet en un tour (512 tronquerait les plans profonds)
+  num_epochs: 21                       # ≈ 980 steps (374 items / 8 prompts/step ≈ 47 steps/epoch)
+  learning_rate: 7e-6                  # palier 0 ; « un poil plus grand » qu'exp20 (5e-6) ; ÷3 / 3 epochs
+  beta_kl: 0.01                        # palier 0 ; suit le LR (÷3 aux mêmes paliers)
+  lr_stage_every_epochs: 3
+  lr_stage_factor: 3
+  attn_implementation: flash_attention_2
+  fewshot: 10                          # mêmes exemples qu'exp18/19/20, reformatés single-turn
+  vllm_max_len: 16384                  # prompt single-turn ≈ 3-4k tokens (vs ~20k en dialogue multi-tour)
+  eval_every: 50                       # éval single-turn (run_plan_test_eval) — MÊME protocole que le training
+  eval_items: 100
+  save_steps: 47                       # ~1 checkpoint/epoch
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs      # checkpoints resumables sur l'overlay ; best adapter sur le home
+
+paliers_prevus:                        # LR / beta par tranche de 3 epochs (~140 steps)
+  epochs_0_3:   { lr: 7.00e-6, beta: 1.00e-2 }
+  epochs_3_6:   { lr: 2.33e-6, beta: 3.33e-3 }
+  epochs_6_9:   { lr: 7.78e-7, beta: 1.11e-3 }
+  epochs_9_12:  { lr: 2.59e-7, beta: 3.70e-4 }
+  epochs_12_15: { lr: 8.64e-8, beta: 1.23e-4 }
+  epochs_15_18: { lr: 2.88e-8, beta: 4.12e-5 }
+  epochs_18_21: { lr: 9.60e-9, beta: 1.37e-5 }
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --plan-mode
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 1024 --max-items 0
+    --num-epochs 21 --learning-rate 7e-6 --beta 0.01
+    --lr-stage-every-epochs 3 --lr-stage-factor 3
+    --fewshot 10
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp21_pure_reasoning
+    > logs/exp21_pure_reasoning.log 2>&1 &
+
+references_pour_lecture:
+  exp16_single_turn_base_extracteur_informe: "12/100 (extracteur qui répare) ; extracteur aveugle plus bas — ici PAS d'extracteur du tout, la borne exp16 n'est qu'indicative"
+  exp20_multi_tour_meme_recette: "best 58/100 @ step 800 (éval multi-tour, non comparable directement)"
+  objectif_1: "courbe d'apprentissage single-turn : le reward doit monter depuis la baseline du 1er rollout"
+  objectif_2: "profil par depth à comparer au multi-tour (depth 3-4 = planification ou dialogue ?)"
+
+surveillance:
+  - "lignes [rollout-plan] : n_actions (taille des plans parsés) et episode_reward par batch"
+  - "eval/parse_fail : plans sans aucune action parsée (doit rester ~0 avec le few-shot)"
+  - "kl wandb : mêmes seuils qu'exp20 (sain ~0.001, dérive > 0.05 = alerte) — LR départ plus haut (7e-6)"
+  - "completions/mean_length : un effondrement vers 0 = le modèle n'émet plus de plan"
+
+observations_lancement:   # 2026-07-27, premiers steps
+  contexte_vm: "purge /tmp (reboot) — env v2 reconstruit via setup_agentgym_rl_v2.sh (~10 min, wheel flash-attn réutilisé), serveur TextCraft relancé"
+  smokes: "parsing (3 cas) OK ; replay d'un plan connu-bon → reward 1.0 ; smoke GPU 2 steps : rollouts + éval single-turn + save-best OK, parse_fail=0"
+  prompt_tokens: "~1830 (règles + 10 exemples single-turn) vs ~20k en dialogue multi-tour"
+  premier_step: "reward mean 0.42 (27/64) puis ~0.35 — baseline single-turn nettement au-dessus de 0, signal GRPO riche"
+  vitesse: "~22 s/it (vs 47 s/it exp20 multi-tour) → ETA ~6 h pour 966 steps"
+  kl_lr: "lr=7e-6, beta=0.01 confirmés au palier 0 ([lr-beta-stage] step=0)"
+
+results:
+  courbe_eval_single_turn: "27 (step 50) → 36-44 (plateau steps 100-750) → pic 47 @ step 800 → 36-42 (fin)"
+  best_adapter: saves/trl_grpo/exp21_pure_reasoning_best (step 800, adapter-only)
+  run_complet: "966 steps / 21 epochs, pas de collapse, terminé 2026-07-27 ~16:11"
+  re_eval_independantes:   # 2026-07-27, best step 800 mergé (/tmp/models/qwen25_3b_exp21_step800)
+    single_turn_protocole_training: "37/100 (fewshot k=10, T=1.0) — le 47 périodique était un pic bruité ; par depth : d1 74% (23/31), d2 32% (13/41), d3 4% (1/25), d4 0% — fichier eval_single_turn_best800.json"
+    multitour_classique_zeroshot: "9/100 (eval_textcraft.py, 100 items) — RÉGRESSION sous le baseline 18 : le modèle déverse tout son plan multi-actions dans chaque message ('Error: Only one Action is allowed per response'), timeout 30 tours quasi systématique (mean_rounds 27.8) — eval_multitour_best800/eval_logs/"
+
+verdict: >
+  Le RL single-turn apprend bien SA tâche : 27 → ~40 (re-éval honnête 37/100),
+  +10 pts vs la baseline single-turn équivalente. MAIS (1) le mur de profondeur
+  est INCHANGÉ (d3 4%, d4 0%) — même à LR départ plus haut, le single-turn ne
+  débloque pas la planification profonde : le mur depth 3-4 est bien un problème
+  de PLANIFICATION, pas de gestion du dialogue long ; (2) interférence
+  catastrophique sur le protocole multi-tour (9/100 en éval classique, sous le
+  baseline 18) : entraîné à émettre des plans complets, le modèle ne sait plus
+  faire une action par tour. Le single-turn pur est donc une spécialisation
+  destructrice — pistes : mix des deux formats au training, ou garder le
+  single-turn comme outil d'analyse plutôt que comme recette de production.

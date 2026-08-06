@@ -2317,3 +2317,352 @@ validé. Détail complet : `docs/hebdo/21juillet/session_2026-07-22_migration_st
   périodique ; full-FT+bnb ; SNIS ; few-shot k=10 ; chemin HF ; serveur v2 + eval_textcraft
   inter-envs). Vitesse : smoke complet en 25-45 s (vs minutes avant). Aucun run LONG
   encore — surveiller le premier de près.
+
+## 2026-07-23 — Reprise (Cursor) : schedule LR/beta par paliers codé + exp20 lancé (1er run long stack v2)
+
+La session Claude Code du 22/07 s'est coupée (crédit) au tout début de la tâche
+« expé from scratch avec LR ÷3 / 3 epochs et beta adapté ». Reprise depuis Cursor :
+migration v2 vérifiée en place (commit 1298b95 ; glibc 2.39 ; env v2 intact avec
+vllm 0.25.1 / trl 1.9.0 / flash-attn 2.8.3.post1), puis la partie manquante codée.
+
+**Nouveau `schedules.StagedLrBetaCallback`** (+ CLI `--lr-stage-every-epochs/
+--lr-stage-factor/--lr-stage-keep-beta` dans train_grpo.py) : LR ET beta KL
+divisés par 3 toutes les 3 epochs. Faisabilité vérifiée dans TRL 1.9.0 : beta est
+relu à chaque loss (la capture à l'init est Liger-only) ; le LR se pilote en
+modifiant base_lrs du LambdaLR constant + param_groups. Palier recalculé depuis
+state.epoch (stateless, resume-safe). Décision Vadim : beta SUIT le LR (÷3 aux
+mêmes paliers) ; 21 epochs (~980 steps, 7 paliers, même budget qu'exp19.2).
+Validé par smoke GPU dédié (6 steps = 3 epochs, transitions aux bonnes epochs,
+LR effectif loggé conforme) avant lancement.
+
+**exp20_staged_lr_v2 lancé** (nohup, env v2) : recette exp19.2 (Qwen nu, GRPO
+LoRA, k=10, N=8, 64 traj/step, éval/50×100) + paliers. Double objectif :
+endurance de la stack v2 sur ~980 steps (sync colocate en mémoire, vitesse vs
+246 s/it d'exp19.2) et anti-collapse par schedule (exp19.2 avait divergé à
+l'epoch ~7.5 encore à 5e-6 ; ici le LR y sera déjà à ~5.6e-7). Détail :
+docs/hebdo/21juillet/session_2026-07-23_reprise_cursor_exp20_staged_lr.md et
+runs/10_fewshot_rl/exp20_staged_lr_v2/config.yaml.
+
+## 2026-07-23 (suite) — Audit des hyperparamètres GRPOConfig figés en dur ; `--lr-scheduler-type` exposé
+
+Pendant que exp20 tourne, revue pédagogique de `train_grpo.py` en Cursor (dossier
+`src/train/` en détail). Question posée : pourquoi `lr_scheduler_type` reste
+`"constant"` même quand on voudrait autre chose. Audit :
+
+- **`lr_scheduler_type="constant"`** : figé en dur, **aucun** flag CLI pour le
+  changer. Origine : `17d2d55` (11 juin, audit verl→TRL pour répliquer la Table 6
+  du papier), justification alors valable, jamais reproposée depuis. Complication
+  découverte : `StagedLrBetaCallback` (codé ce matin même, cf. entrée précédente)
+  **suppose** ce mode constant pour fonctionner (elle réécrit `base_lrs` en
+  supposant un multiplicateur de schedule ≡ 1) — donc pas qu'une question
+  d'obsolescence, un vrai couplage à respecter.
+- **`loss_type="dapo"`** : même commit du 11 juin, mais double justification
+  dans le commentaire d'origine (repro papier + "pinned for reproducibility
+  across TRL versions" — anti-dérive lors des montées de version TRL, utile
+  indépendamment de toute repro). Laissé en l'état.
+- **`num_iterations=1`** : corrigé le 11 juin (pas une repro papier arbitraire :
+  découverte que le fork verl du papier ignore lui-même `ppo_inner_epochs=2`).
+  Couplé à `vllm_importance_sampling_correction=False` (figé à la migration v2) :
+  avec `num_iterations=1`, le ratio PPO ≡ 1 (skip du forward `old_logprobs`) ;
+  changer l'un sans l'autre introduirait un ratio calculé sur des logprobs
+  partiellement fausses (tokens masqués = 0.0). Laissé en l'état.
+- **`temperature=1.0` / `top_p=1.0`** : aucun rapport avec l'audit du 11 juin —
+  hérités du tout premier script jetable (`scratch/07_trl_grpo_textcraft_smoke.py`,
+  6 mai), jamais remis en question depuis, aucun couplage connu. Laissés en
+  l'état (portée de la demande limitée à `lr_scheduler_type` pour l'instant).
+
+**Changement appliqué** (portée volontairement limitée) : `--lr-scheduler-type`
+ajouté à `train_grpo.py` (choices `constant`/`constant_with_warmup`/`linear`/
+`cosine`/`cosine_with_restarts`, défaut `"constant"` → **zéro changement de
+comportement** pour tout run qui ne passe pas le flag). Garde-fou : `SystemExit`
+si combiné à `--lr-stage-every-epochs` avec une valeur ≠ `"constant"` (les deux
+mécanismes sont incompatibles, cf. couplage ci-dessus). Validé : `py_compile` +
+`--help` OK sur l'env v2, aucune erreur de lint.
+
+**Confirmé sans impact sur exp20_staged_lr_v2** (déjà en cours depuis 08:24) :
+un process Python déjà lancé ne relit jamais son code source modifié sur disque ;
+et de toute façon le run n'utilise pas le nouveau flag, donc la valeur effective
+de `lr_scheduler_type` reste `"constant"` avant/après le changement — aucune
+divergence de comportement. Log confirmé : `[lr-beta-stage]` actif dès le
+step 0 (palier 0, lr=5e-6, beta=1e-2), toujours au palier 0 au step 109
+(epoch 2.37, palier 1 attendu vers step ~138).
+
+## 2026-07-27 — Mode « pure reasoning » (single-turn RL) codé et lancé : exp21_pure_reasoning
+
+Contexte VM : `/tmp` purgé (reboot) → env v2 reconstruit via
+`setup_agentgym_rl_v2.sh` (~10 min, wheel flash-attn réutilisé, mêmes versions :
+vLLM 0.25.1 / TRL 1.9.0 / flash-attn 2.8.3) ; serveur TextCraft relancé.
+
+**Nouveau paradigme d'entraînement** (demande Vadim) : le modèle émet en UNE
+complétion le raisonnement (`Thought:`) puis la séquence d'actions complète
+(`Actions:`, une commande par ligne) ; la séquence est parsée par **regex
+déterministe** directement dans la complétion, rejouée TELLE QUELLE dans l'env
+(aucune réparation, aucun feedback intermédiaire), reward sparse 0/1 rétropropagé
+par GRPO sur la complétion entière. Différence clé avec exp16 : PAS de second
+appel LLM extracteur (le crédit revient à 100 % aux tokens générés — l'extracteur
+« informé » d'exp16 réparait même les plans).
+
+**Code** (patron SNIS : rollout_func externe branchée sur le `main()` existant) :
+- `src/train/rollout_plan.py` (nouveau) : règles single-turn (`PLAN_RULES`),
+  few-shot k=10 reformaté « tâche → Thought + plan » depuis le MÊME fichier
+  d'exemples qu'exp18/19/20, `parse_plan_actions` (regex get/craft/inventory,
+  tolérant aux numérotations), `replay_actions` (préfixe "Action: ", stop à done),
+  `plan_rollout_func` (contrat TRL : env_mask tout à 1, single turn),
+  `run_plan_test_eval` (éval périodique single-turn, même protocole que le
+  training) + selftest parsing (`python -m src.train.rollout_plan`).
+- `train_grpo.py` : flag `--plan-mode` (3 points de branchement : few-shot,
+  dataset, rollout/éval ; garde-fous vs SNIS et max-rounds-schedule).
+- `periodic_eval.py` : `TestEvalCallback(eval_fn=...)` — fonction d'éval
+  interchangeable, save-best et logging inchangés.
+
+**Validation avant lancement** : selftest parsing (3 cas) ; replay d'un plan
+connu-bon (exemple few-shot idx 223) → reward 1.0 ; prompt ~1 830 tokens (vs ~20k
+en dialogue multi-tour) ; smoke GPU 2 steps (rollouts + éval single-turn +
+save-best adapter OK, parse_fail=0, artefacts nettoyés).
+
+**exp21_pure_reasoning lancé** (runs/11_reasoning_rl/, wandb `l4rwppam`) :
+config exp20 (LoRA depuis zéro, N=8, 64 traj/step, k=10, paliers LR/beta ÷3 /
+3 epochs, 21 epochs = 966 steps, éval/50×100) avec LR départ **7e-6** (« un poil
+plus grand » que les 5e-6 d'exp20) et `max_completion_length` 1024. Premiers
+steps : reward mean 0.35-0.42 (baseline single-turn bien au-dessus de 0 → signal
+GRPO riche), ~22 s/it (vs 47 multi-tour), ETA ~6 h. Question scientifique : le
+mur depth 3-4 vient-il de la planification (le single-turn butera pareil) ou de
+la gestion du dialogue long (le single-turn peut faire mieux) ?
+
+## 2026-07-27 (suite) — Bilan paliers LR exp20 ; piste LR adaptatif au reward train
+
+**Constat exp20** (`StagedLrBetaCallback`, LR/beta ÷3 toutes les 3 epochs) :
+diviser le LR par paliers **calendaires** permet effectivement de **stabiliser**
+l'entraînement (pas de collapse KL, contrairement à exp19.2 à 5e-6 constant) et
+d'**aller chercher de meilleures perfs** (58/100 @ step 800 vs 45/100 best
+exp19.2). En revanche, en regardant le **reward train** (mean rollout/step),
+l'impression est que **chaque palier casse une dynamique d'apprentissage** en
+cours — le schedule est piloté par le temps, pas par l'état d'apprentissage.
+
+**Piste proposée** (non codée) : faire **décroître le LR en fonction du reward
+train** — par ex. diviser le LR (et beta ?) quand la **dérivée d'une moyenne
+roulante** du reward train reste ≤ 0 pendant plusieurs steps consécutifs.
+Fenêtre de la moyenne roulante à calibrer : **~¼ d'epoch** (~12 steps sur
+374 items / 8 prompts/step ≈ 47 steps/epoch) pour lisser le bruit du tirage
+d'items tout en restant réactif. Détail :
+`docs/hebdo/31juillet/session_2026-07-27_paliers_lr_et_reward_train.md` ;
+à reporter dans `docs/RESULTS.md` (§ Exp 19–20).
+
+## 2026-07-27 (soir) — exp21 clôturé (37 single-turn / 9 multi-tour) ; LR adaptatif codé ; exp22 lancé pour la nuit
+
+**Clôture exp21** (966 steps, terminé ~16:11, best adapter step 800 sauvé) —
+deux re-évals indépendantes du best mergé :
+- **single-turn (protocole training)** : **37/100** (le 47 périodique était un
+  pic bruité, même leçon que le 58→54 d'exp10.8). Par depth : d1 74 %, d2 32 %,
+  **d3 4 %, d4 0 %** → le mur depth 3-4 est bien un problème de PLANIFICATION,
+  pas de gestion du dialogue long.
+- **multi-tour classique (zero-shot)** : **9/100**, sous le baseline 18 —
+  interférence catastrophique : le modèle déverse tout son plan dans chaque
+  message (« Only one 'Action' is allowed per response »), timeout 30 tours.
+  Le single-turn pur est une spécialisation destructrice pour l'agent multi-tour.
+Verdict et artefacts : runs/11_reasoning_rl/exp21_pure_reasoning/ (config.yaml,
+eval_single_turn_best800.json, eval_multitour_best800/eval_logs/).
+
+**RewardAdaptiveLrCallback codé** (schedules.py) — la piste du matin, demandée
+par Vadim pour un run de nuit : moyenne roulante du reward train sur 1 epoch
+(~3000 trajectoires), check toutes les ½ epochs ; si sous le best historique
+(tolérance eps=0.005) pendant 3 checks consécutifs → LR et beta ÷3 (comme
+exp20), best réinitialisé à la valeur courante (cooldown naturel). Application
+LR/beta factorisée dans `apply_lr_beta` (source unique avec StagedLrBetaCallback).
+CLI : `--lr-adaptive` (+ window/check/patience/eps/min-lr), exclusif avec
+`--lr-stage-every-epochs`. Le « repartir du best ckpt à chaque coupe » évoqué
+n'est PAS implémenté (sélection test-set dans la trajectoire de training +
+restauration mi-run risquée) — option future. Validé : selftest CPU
+(`python -m src.train.schedules` : coupe exactement après 3 checks sous le best,
+LR/beta/base_lrs cohérents, pas de coupe en phase montante) + smoke GPU 2 steps
+(câblage on_log, aucun crash).
+
+**exp22_reward_adaptive_lr lancé** (runs/10_fewshot_rl/, PID 3246197) : recette
+exp20 à l'identique (LoRA depuis zéro, k=10, N=8, 64 traj/step, LR 5e-6,
+beta 0.01, éval/50×100), seule la décroissance change. **100 epochs** (~4600
+steps ≈ 60 h à 47 s/it) — run de nuit, stop manuel possible demain matin.
+Objectif : battre le 58 d'exp20 en ne coupant le LR que quand le reward train
+plafonne vraiment. Surveillance : lignes [reward-adaptive-lr] + wandb adaptive/.
+
+## 2026-07-28 — exp22 arrêté (les coupes figeaient la dérive) → exp22.1 avec restore du best train
+
+**Verdict exp22** (arrêt manuel step 759/4600, epoch 16.5) : le critère adaptatif
+seul ne suffit pas. Test : 49/100 @ step 200 puis dégradation continue → 22-26
+après step 400. Train : pic de moyenne roulante 0.4721 (epoch ~4.5-5) puis chute
+vers 0.24. Les 4 coupes (epochs 6.5 / 8.0 / 9.5 / 12.0) sont arrivées APRÈS que
+la dérive a été consommée, et comme on gardait les poids courants, chaque LR
+réduit CONSOLIDAIT l'état dégradé — le modèle a fini gelé à LR 6e-8 sur un état
+bien pire que son pic. (Mêmes dynamiques de dérive qu'exp19.2, mais sans collapse
+KL brutal grâce aux coupes.)
+
+**exp22.1_restore_best lancé** — la pièce manquante, demandée par Vadim :
+`--lr-adaptive-restore-best` (train_grpo.py) + save/restore dans
+RewardAdaptiveLrCallback (schedules.py) :
+- à chaque nouveau best de moyenne roulante TRAIN, l'adapter LoRA est sauvé sur
+  le home (`saves/trl_grpo/<run>_besttrain`, ~120 Mo, swap atomique, remplacé à
+  chaque best + `.besttrain_info`) → point de reprise si coupure infra ;
+- à chaque coupe ÷3, poids RECHARGÉS depuis ce best (set_peft_model_state_dict,
+  ancre KL intacte — mécanisme validé le 21/07) + moments Adam remis à zéro ;
+  TRL resynchronise vLLM au step suivant (colocate) ;
+- cooldown propre : après coupe, historique vidé, best remis à None, prochain
+  check après une fenêtre complète post-coupe (fini le « best = valeur courante »).
+Le best reste 100 % TRAIN : aucun peeking test, le Pass@1 périodique reste honnête.
+Validation : selftest CPU (2 scénarios, hooks mockés) + smoke GPU 6 steps avec
+coupe forcée (eps=-1) — save réel, restore + reset Adam, rollouts post-restore
+sains, re-save du best sous le nouveau régime. Config identique exp22 par
+ailleurs (LR 5e-6, beta 0.01, k=10, 100 epochs, éval/50 steps).
+
+## 2026-07-29 — autopsie exp22.1, ménage disque (politique « best only »), exp22.2
+
+**exp22.1 mort à 06:45** (purge /tmp — interpréteur + checkpoints périodiques
+perdus ; les best sur home ont survécu, comme conçu). Autopsie : le restore
+fonctionne (reward remonte au best après chaque coupe) mais les 7 coupes
+étaient pilotées par le BRUIT — référence = max de fenêtres bruitées (+1-2σ),
+eps 0.005 vs bruit inter-fenêtres réel ±0.015-0.02 (mesuré sur politique gelée,
+epochs 28-46), coupes à cadence minimale 2.5 ep → LR 2.3e-9 dès l'epoch 28,
+18 epochs à vide. Best test 53/100 @ 850. Constat : toutes les variantes r=16
+plafonnent à train ~0.47-0.50 → mur de capacité/exploration, pas de schedule.
+Détail : docs/hebdo/31juillet/session_2026-07-29_autopsie_exp22.1_et_exp22.2.md
+
+**Ménage disque (home 100 % → 28 %)** : supprimés exp17_snis_v1_best (5.8 Go),
+wandb/ local (1.3 Go), env legacy ~/envs/agentgym-rl (12 Go, textcraft gardé),
+Qwen du home (5.8 Go, copié sur /tmp/models — retéléchargeable via le nouveau
+setup/ensure_qwen_tmp.sh ; DEFAULT_MODEL_PATH → /tmp). Best adapters regroupés
+dans saves/keep_best/ (README). setup_agentgym_rl_v2.sh rebasé sur pyenv 3.11.7.
+Politique actée (CLAUDE.md) : le home ne stocke que les best + optimizers.
+
+**exp22.2_rank64_median lancé** : rang LoRA 16→64 (CLI --lora-r/--lora-alpha)
++ critère adaptatif durci : référence = médiane des 5 derniers checks (fini le
+ratchet max), eps 0.02 (~2σ mesuré), palier LR ≥ 3 epochs (coupe « retenue »,
+demande Vadim), plancher 1e-7 avec ARRÊT du run, optimizer.pt sauvé avec le
+best train et restauré à la coupe (moments Adam du moment du best). Selftest
+CPU 3 scénarios + smoke GPU avant lancement.
+
+## 2026-07-29 (soir) — verdict exp22.2 (LR trop haut pour r=64), lancement exp22.3
+
+**exp22.2 arrêté à step 671** (epoch ~14.5). Verdict : le régime r=16 (LR 5e-6,
+beta 0.01) est trop agressif pour r=64 — 4x plus de paramètres entraînables à
+même LR par paramètre, l'adapter dérive ~4x plus fort face à l'ancre KL. Spike
+KL ~12 000 / grad_norm ~214 000 dès l'epoch 3 (steps 115-119) : le test chute
+de 47 (@ step 50, jamais rebattu) à 25 et ne s'en remet pas. La mécanique
+adaptative durcie a bien fonctionné (3 coupes ÷3 avec restore poids+optimizer,
+palier min 3 ep respecté) mais elle stabilisait un état déjà dégradé. Le
+reward train plafonne à 0.44 < plafond r=16 (~0.47-0.50) et depth≥3 = 0 →
+aucun signe que la capacité était le facteur limitant. Bests archivés dans
+saves/keep_best/exp22.2_rank64_median_{best,besttrain}.
+
+**exp22.3_rank64_lr_div4 lancé** (wandb r4yjswfs) : ablation à UNE variable —
+LR initial 5e-6 → 1.25e-6 (÷4, demande Vadim), tout le reste identique
+(r=64/α=128, critère adaptatif exp22.2, restore best+optimizer, plancher 1e-7
+avec arrêt → 2 coupes max avant stop). Question posée : à départ stable,
+r=64 dépasse-t-il le plafond train r=16 ? Critères : pas de spike KL epoch
+1-5, train > 0.44 puis > 0.50, test > 47. Premier step sain : KL 0,
+grad_norm 0.12, reward 0.30, entropy 0.95, ~50 s/it.
+
+## 2026-07-30 — exp22.3 tuée par la fermeture de session (pas par elle-même), relance avec setsid
+
+Autopsie du « plantage » : le 1er lancement d'exp22.3 (29/07 19:03) est mort à
+19:49 au step 53, en plein rollout, SANS traceback — SIGKILL externe. Cause :
+le nettoyage de fin de session Cursor tue le groupe de processus ~45 min après
+la fermeture ; `nohup` n'ignore que SIGHUP, pas un kill de process group
+(exp22.2 lancée le matin avait survécu car la session était restée active
+toute la journée). Événement séparé : recréation du pod le 30/07 à 08:05 →
+/tmp vidé (env v2, Qwen, checkpoints périodiques) + serveur TextCraft mort.
+Les 53 steps du 1er essai étaient parfaitement sains (KL ~0.0009 constant,
+pas l'ombre du spike d'exp22.2 — le LR ÷4 fait son travail ; test 34/100 @ 50).
+
+Remise en route : env v2 reconstruit (~6 min, wheel flash-attn), Qwen
+retéléchargé (fix au passage : ensure_qwen_tmp.sh cherchait `hf` dans le PATH
+de l'env v2 en cours de reconstruction — utiliser l'env textcraft en repli),
+TextCraft relancé, bests orphelins du 1er essai supprimés, **relance de zéro
+avec `setsid nohup`** (le python est leader de sa propre session, vérifié
+SID = PID) — wandb `jr9sol1u`. Règle actée dans CLAUDE.md : tout lancement
+long depuis l'agent se fait avec `setsid nohup ... &`.
+
+## 2026-07-31 — verdict exp22.3 (stable mais coupes trop tardives), lancement exp22.4 (calendaire ÷2 / 4 ep)
+
+**exp22.3 arrêtée à step 1322** (epoch ~28.7, ~26 h). Bilan en deux temps :
+le LR ÷4 a RÉGLÉ la stabilité (zéro spike KL sur tout le run, vs 12k sur
+exp22.2) et la montée epochs 1-11 est saine (test 36 → 49 @ steps 350-500).
+Mais (1) le plafond train r=16 n'est pas dépassé — pic rolling mean 0.478,
+soit exactement le niveau 0.47-0.50 des runs r=16 : 2e coup porté à
+l'hypothèse capacité ; (2) le test décroche après l'epoch ~11 alors que le
+train se maintient — sur-spécialisation, les coupes adaptatives arrivent
+trop tard (1re coupe epoch 9.5, 2e epoch 13). Lecture Vadim : « bien parti
+jusqu'à epoch 4-5, après le LR était trop grand ». Bests archivés dans
+saves/keep_best/ (49/100 + besttrain 0.478 avec optimizer).
+
+**exp22.4_rank64_staged_div2 lancée** (wandb `o9wva7cn`, setsid) : retour aux
+paliers CALENDAIRES d'exp20 mais plus doux et plus fréquents — LR et beta ÷2
+toutes les 4 epochs (exp20 : ÷3/3 ep), départ 1.25e-6 (le départ stable
+validé), r=64, 24 epochs = 6 paliers (LR final 3.9e-8), 1104 steps (~20-24 h).
+L'idée : couper PENDANT la dynamique de montée (epoch 4), pas après le
+décrochage. Critères : tenir le pic au-delà de l'epoch 11, battre 49.
+
+## 2026-07-31 (après-midi) — verdict exp22.4, StagedBestRestoreCallback, lancement exp22.5
+
+**exp22.4 arrêtée** (epoch ~8.8) : même profil qu'exp22.3 — pic test 50/100 @
+step 250 (epoch ~5.4) puis érosion (49, 43, 42), malgré la coupe calendaire
+précoce à l'epoch 4. Diagnostic convergent sur toute la lignée exp22 : le
+problème n'est pas QUAND on coupe (l'adaptatif coupe trop tard, le calendaire
+court coupe pendant la montée) mais D'OÙ on repart — la coupe consolide l'état
+COURANT, qui après le pic est déjà une dérive.
+
+**exp22.5 (idée Vadim)** : paliers calendaires LONGS + restore du best.
+Nouveau `StagedBestRestoreCallback` (schedules.py) :
+- chaque palier de LR dure 10 epochs (vraies mesures stables) ;
+- pendant le palier : save du best du palier (adapter + moments Adam, sur la
+  moyenne roulante du reward train) dans `<run>_stagebest` + promotion vers
+  le best GLOBAL `<run>_besttrain` quand il est battu ;
+- à la frontière : RESTORE du best du palier écoulé (poids + optimizer) PUIS
+  LR et beta ÷2 — chaque palier repart du meilleur état vu, la dérive de fin
+  de palier est jetée.
+Refacto au passage : le save/restore d'adapter (+optimizer, swap atomique) de
+RewardAdaptiveLrCallback extrait en fonctions de module `save_best_adapter` /
+`restore_best_adapter`, partagées par les deux callbacks. Nouveau flag
+`--lr-stage-restore-best` (train_grpo.py, avec garde-fous LoRA/staging).
+Validation : selftest CPU test 4 (restore à la frontière, LR÷2 appliqué après
+restore, la dérive de fin de palier n'écrase pas le stage best, promotions
+globales correctes) + les 3 selftests existants inchangés.
+
+**exp22.5_stage10ep_restore lancée** (wandb `096kat76`, setsid) : r=64, départ
+1.25e-6, beta 0.01, 50 epochs = 5 paliers de 10 (~2300 steps, week-end).
+Incident au passage : le kill d'exp22.4 de 17h15 avait raté sa cible (pgrep
+avait matché le wrapper sandbox de ma propre commande) — retuée proprement
+avant le lancement (GPU 0 Mo vérifié).
+
+**Rebond 17h45 (décision Vadim) : exp22.5 relancée en ZERO-SHOT.** Le 1er
+lancement few-shot k=10 (wandb 096kat76, ~40 min) a été arrêté et TOUTES ses
+traces purgées (log, bests, checkpoints /tmp, run wandb supprimé via l'API
+après validation) pour une comparaison propre. Relance à l'identique SANS
+--fewshot (défaut 0 → aucun exemple injecté, ni dans les rollouts ni dans
+l'éval périodique — vérifié : pas de ligne [fewshot] au démarrage). Question
+posée : quelle part du niveau ~50 de la lignée exp19-22.4 vient des exemples
+dans le prompt vs du RL lui-même ? Références : zero-shot sans training =
+18/100 ; few-shot k=10 lignée 22.x = 49-50. Wandb `hd2bhe69` (setsid,
+PID 3488174), 50 epochs = 5 paliers de 10, week-end.
+
+## 2026-08-03 — bilan week-end exp22.5 zero-shot, lancement du bras few-shot (exp22.6)
+
+**exp22.5 zero-shot morte dans la nuit ven→sam** (log figé 01/08 02:05 UTC,
+step 1260/2300, epoch ~27.4) — tuée en plein rollout sans traceback :
+recréation du pod week-end, /tmp purgé (même signature que le 30/07). Les
+bests sur home ont survécu, archivés dans saves/keep_best/ (best test,
+besttrain global, stagebest).
+
+Résultats partiels (27 epochs, exploitables) :
+- **La mécanique StagedBestRestore fonctionne en réel** : transitions aux
+  epochs 10 et 20, restore du best de palier aux deux frontières,
+  13 promotions du best global.
+- **Zero-shot : test 18 (= baseline) → 22 → 32 → pic 41/100 @ steps 400-500**,
+  puis oscille 20-36. Best train global 0.3692 @ epoch 8.
+- Comparaison lignée few-shot (49-50 test, ~0.44-0.48 train) : les exemples
+  du prompt valent ~+9-10 points de test à recette comparable.
+
+**exp22.6_stage10ep_fewshot lancée** (wandb `r5whsjby`, setsid) : bras 2 de
+l'ablation propre demandée par Vadim — la recette exp22.5 à l'IDENTIQUE
+(r=64, 1.25e-6, paliers 10 ep ÷2 + restore, 50 epochs) avec pour seule
+différence `--fewshot 10`. Infra reconstruite avant lancement (env v2 ~5 min
+via wheel, Qwen retéléchargé, TextCraft relancé). Premier signal immédiat :
+reward train ~0.48 dès le step 4 (vs ~0.33 au départ zero-shot) — les
+exemples élèvent le taux de succès des rollouts avant tout apprentissage.

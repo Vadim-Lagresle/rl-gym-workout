@@ -1,0 +1,102 @@
+name: exp22.1_restore_best
+date: 2026-07-28
+description: >
+  exp22 + la pièce manquante : le RETOUR AU BEST à chaque coupe de LR. Verdict
+  exp22 : le critère adaptatif (coupe si la moyenne roulante du reward train
+  reste sous le best pendant 3 demi-epochs) coupe APRÈS que la dérive a été
+  consommée (coupe #1 epoch 6.5 vs pic train epoch ~4.5-5), et comme on gardait
+  les poids courants, le LR réduit consolidait l'état DÉGRADÉ (test 49 → 22-26,
+  train 0.47 → 0.24). Ici (--lr-adaptive-restore-best) : (1) à chaque nouveau
+  best de moyenne roulante TRAIN, l'adapter LoRA est sauvé sur disque persistant
+  (saves/trl_grpo/<run>_besttrain, ~120 Mo, remplacé à chaque nouveau best —
+  point de reprise en cas de coupure infra) ; (2) à chaque coupe ÷3, les poids
+  de ce best sont rechargés (set_peft_model_state_dict, ancre KL inchangée) et
+  les moments Adam sont remis à zéro → le LR réduit consolide le MEILLEUR état
+  connu ; (3) cooldown propre : après la coupe, historique vidé et prochain
+  check après une fenêtre complète de rewards post-coupe. Le best est 100 %
+  TRAIN (moyenne roulante ~3000 trajectoires) — aucun peeking sur le test set,
+  le Pass@1 périodique reste un estimateur honnête.
+
+algorithm: GRPO (TRL 1.9 + vLLM colocate), LoRA r=16/α=32, few-shot k=10, LR adaptatif au reward train + restore du best train à chaque coupe
+model: models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu
+script: src/train/train_grpo.py --fewshot 10 --lr-adaptive --lr-adaptive-restore-best
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2
+wandb: 0z416gj1   # lancé 2026-07-28 ~11:00, PID 2919046 — https://wandb.ai/v-lagresle-criteo/rl-gym-workout/runs/0z416gj1
+
+training:
+  fine_tuning: LoRA
+  num_generations: 8
+  gradient_accumulation_steps: 64   # 64 traj/step, 8 prompts/step
+  max_completion_length: 512
+  num_epochs: 100                   # ≈ 4600 steps (~47 steps/epoch) — stop manuel possible
+  learning_rate: 5e-6               # départ identique exp20/exp22
+  beta_kl: 0.01                     # suit le LR à chaque coupe
+  lr_adaptive: true
+  lr_adaptive_restore_best: true    # LA variable vs exp22
+  lr_adaptive_window_epochs: 1.0    # moyenne roulante ~47 steps ≈ 3000 trajectoires (std ≈ 0.009)
+  lr_adaptive_check_every_epochs: 0.5
+  lr_adaptive_patience: 3           # 3 demi-epochs consécutives sous le best → coupe
+  lr_adaptive_eps: 0.005
+  lr_adaptive_min_lr: 1e-9
+  lr_stage_factor: 3
+  attn_implementation: flash_attention_2
+  fewshot: 10                       # mêmes exemples qu'exp18/19/20/22
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs   # checkpoints resumables sur l'overlay ; best test ET best train sur le home
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --num-epochs 100 --learning-rate 5e-6 --beta 0.01
+    --lr-adaptive --lr-adaptive-restore-best
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp22.1_restore_best
+    > logs/exp22.1_restore_best.log 2>&1 &
+
+validation_pre_lancement:
+  selftest_cpu: "python -m src.train.schedules — coupe + 1 restore/coupe + cooldown + re-save post-coupe OK (hooks mockés)"
+  smoke_gpu: "6 steps, coupe forcée (eps=-1, patience 1) : save réel de l'adapter (120 Mo), restore + reset Adam au step 4, rollouts post-restore sains (sync vLLM OK), re-save du best au step 6"
+
+references_pour_lecture:
+  exp20_paliers_calendaires: "58/100 @ step 800 (périodique) — la référence à battre"
+  exp22_adaptatif_sans_restore: "49/100 @ step 200 puis 22-26 : les coupes ont figé la dérive"
+  objectif_1: "au moment des coupes, le reward train doit REMONTER vers le best (lignes 'poids RESTAURÉS') au lieu de stagner en dessous comme exp22"
+  objectif_2: "> 58 périodique (re-éval indépendante du best à la clôture)"
+  objectif_3: "surveiller l'oscillation : si le run boucle best → dérive → restore sans progresser, le plateau est atteint → stop"
+
+surveillance:
+  - "lignes [reward-adaptive-lr] toutes les ½ epochs : rolling_mean, best, bad=k/3, 'best train sauvé', '>>> COUPE' + 'poids RESTAURÉS'"
+  - "wandb adaptive/ : rolling_reward_mean, best, n_bad, lr, n_cuts"
+  - "saves/trl_grpo/exp22.1_restore_best_besttrain/.besttrain_info : step/epoch/mean/lr du best courant"
+  - "~47 s/it attendu → stop manuel demain matin probable"
+
+results:
+  stopped: "mort le 2026-07-29 ~06:45 à step 2158/4600 (epoch 46.9) — purge de /tmp (interpréteur Python du run + checkpoints périodiques perdus)"
+  best_test: "53/100 @ step 850 (adapter → saves/keep_best/exp22.1_restore_best_best)"
+  best_train: "rolling mean 0.4752 @ step 1679 (adapter → saves/keep_best/exp22.1_restore_best_besttrain)"
+  test_trajectory: "montée 38→52 (steps 50-200), plateau 42-53 ensuite — pas de dégradation durable (le restore fait son travail)"
+  coupes: "7 coupes ÷3 (epochs 7, 10.5, 13, 15.5, 20, 23, 28) → LR 2.3e-9 dès l'epoch 28, puis 18 epochs à LR≈0"
+  entropie: "0.95 → collapse à ~0.12 dès step ~400 (politique quasi déterministe, frac_reward_zero_std jusqu'à 0.875)"
+  disque: "home plein à partir de step ~1750 → saves du best train en échec (silencieux, non fatal comme prévu)"
+
+verdict: >
+  Le restore fonctionne (le reward remonte au best après chaque coupe, plus
+  d'effondrement type exp22) MAIS les coupes elles-mêmes étaient pilotées par
+  le BRUIT : la référence (max de fenêtres bruitées) est biaisée de +1-2σ, la
+  tolérance eps=0.005 est 3-4x sous le bruit inter-fenêtres réel (±0.015-0.02,
+  mesuré epochs 28-46 sur politique gelée), d'où des coupes à la cadence
+  minimale possible (2.5 ep) et un LR à ~0 dès l'epoch 28. Plafond identique
+  aux autres variantes r=16 (train ~0.47-0.50, test ~50) → le mur semble être
+  la capacité/exploration, pas le schedule. Correctifs → exp22.2 : référence
+  médiane des 5 derniers checks, eps 0.02, palier ≥3 epochs, plancher 1e-7
+  avec arrêt du run, rang LoRA 64, optimizer sauvé/restauré avec le best.

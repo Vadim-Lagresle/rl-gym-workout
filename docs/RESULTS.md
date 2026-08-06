@@ -1062,3 +1062,40 @@ chaque merge de best sur disque persistant. Détail : docs/hebdo/21juillet/.
 **Suite privilégiée** : RL initialisé avec prompt few-shot k≈5-20 — départ pass@1
 ~28-31, graines d3 disponibles, et l'écart pass@1→pass@10 (28→60) est exactement la
 marge de fiabilisation que GRPO sait convertir.
+
+---
+
+### Exp 19–20 — few-shot RL + paliers LR/beta (2026-07, GRPO LoRA stack v2)
+
+GRPO LoRA depuis Qwen2.5-3B nu, few-shot k=10 (mêmes exemples que exp18, format
+dialogue multi-tour), N=8, 64 traj/step, éval périodique multi-tour /100.
+Stack v2 (TRL 1.9 + vLLM colocate + flash-attn). Artefacts : `runs/10_fewshot_rl/`.
+
+| Run | LR / schedule | Statut | Best Pass@1 (éval périodique) |
+|---|---|---|---|
+| exp19.2 | 5e-6 **constant**, beta 0.01 | arrêté step ~557 (collapse KL) | **45/100 @ step 300** |
+| exp20 | 5e-6 + **÷3 / 3 epochs** (LR et beta), 21 ep | terminé 966 steps, pas de collapse | **58/100 @ step 800** |
+
+**Lecture exp20 vs exp19.2** : les **paliers LR calendaires** (÷3 toutes les
+3 epochs via `StagedLrBetaCallback`) **stabilisent** l'entraînement et permettent
+d'**atteindre un meilleur pic test** qu'un LR constant à 5e-6 sur la durée du run.
+
+**Limite observée (reward train, 2026-07-27)** : en regardant le reward moyen
+sur les rollouts d'entraînement, chaque division de LR semble **interrompre une
+dynamique d'apprentissage en cours** — le schedule est piloté par le **calendrier**
+(epochs), pas par l'état d'apprentissage. Le Pass@1 test continue néanmoins de
+progresser par à-coups (pic 58 au step 800, LR déjà à ~7e-9) : le schedule n'est
+pas catastrophique, mais le signal train suggère un coût en dynamique à chaque palier.
+
+**Piste ouverte — LR adaptatif au reward train** (non implémentée) :
+- diviser LR (et éventuellement beta) quand la **dérivée d'une moyenne roulante**
+  du reward train reste ≤ 0 pendant plusieurs steps ;
+- fenêtre proposée : **~¼ d'epoch** (~12 steps, soit ~768 trajectoires/step × 12)
+  pour lisser le bruit du tirage aléatoire d'items tout en restant réactif ;
+- implémentation envisagée : callback type `RewardAdaptiveLrCallback` (même
+  mécanisme de modification de `base_lrs` / `trainer.beta` que `StagedLrBetaCallback`).
+  Détail : `docs/hebdo/31juillet/session_2026-07-27_paliers_lr_et_reward_train.md`.
+
+**Suite** : exp21 reprend les paliers calendaires (LR 7e-6, mode single-turn) comme
+témoin ; ablation reward-adaptive vs paliers calendaires à planifier.
+

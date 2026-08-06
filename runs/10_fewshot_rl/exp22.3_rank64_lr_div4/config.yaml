@@ -1,0 +1,114 @@
+name: exp22.3_rank64_lr_div4
+date: 2026-07-29
+description: >
+  Ablation directe d'exp22.2 : UNE seule variable change, le LR initial 5e-6 →
+  1.25e-6 (÷4). Motivation : exp22.2 (r=64 au régime r=16) a dérivé violemment
+  dès l'epoch 3 (spike KL ~12 000, test 47 → 25) — 4x plus de paramètres
+  entraînables à même LR par paramètre, l'adapter bouge ~4x plus fort par
+  rapport à l'ancre KL. Ici on démarre le « gros camion » avec l'accélérateur
+  au quart. beta reste à 0.01 (l'autre option, beta x3, sera testée seulement
+  si le LR ÷4 ne suffit pas). Question posée : à départ stable, est-ce que
+  r=64 pousse le reward train au-delà du plafond r=16 (~0.47-0.50) ? Si non,
+  la capacité LoRA n'est définitivement pas le facteur limitant (le mur
+  depth≥3 = 0 d'exp22.2 le suggère déjà) et on passe aux pistes signal
+  (best-of-N/BOND, curriculum, mix SFT).
+
+algorithm: GRPO (TRL 1.9 + vLLM colocate), LoRA r=64/α=128, few-shot k=10, LR adaptatif exp22.2 (réf médiane, palier ≥3 ep, restore best train + optimizer)
+model: /tmp/models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu
+script: src/train/train_grpo.py --lora-r 64 --learning-rate 1.25e-6 --lr-adaptive ...
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2
+wandb: jr9sol1u  # 2e lancement (2026-07-30 ~10:20)
+
+incidents:
+  premier_lancement: >
+    2026-07-29 19:03, wandb r4yjswfs — MORT à 19:49 (step 53, ~46 min), tué
+    sans traceback ~45 min après la fermeture de la session Cursor : le
+    nettoyage de fin de session a SIGKILLé le groupe de processus (nohup ne
+    protège pas d'un kill de process group). Puis recréation du pod le 30/07
+    à 08:05 → /tmp vidé (env v2, Qwen, checkpoints). Les 53 steps du 1er essai
+    étaient sains (KL ~0.0009 stable, reward ~0.30-0.59, test 34/100 @ 50) —
+    bests orphelins supprimés, relance de zéro.
+  parade: >
+    relance avec `setsid nohup ... &` — le process devient leader de sa
+    propre session, hors du groupe tué à la fermeture. À utiliser pour tous
+    les lancements depuis l'agent.
+
+training:
+  fine_tuning: LoRA r=64 alpha=128
+  num_generations: 8
+  gradient_accumulation_steps: 64
+  max_completion_length: 512
+  num_epochs: 100                   # borne haute — arrêt réel = stop_at_floor ou stop manuel
+  learning_rate: 1.25e-6            # LA variable vs exp22.2 (5e-6 ÷ 4)
+  beta_kl: 0.01
+  lr_adaptive: true
+  lr_adaptive_restore_best: true
+  lr_adaptive_save_optimizer: true
+  lr_adaptive_window_epochs: 1.0
+  lr_adaptive_check_every_epochs: 0.5
+  lr_adaptive_patience: 3
+  lr_adaptive_eps: 0.02
+  lr_adaptive_ref_median_k: 5
+  lr_adaptive_min_stage_epochs: 3
+  lr_adaptive_min_lr: 1e-7          # 1.25e-6 → 4.2e-7 → 1.4e-7 → stop (2 coupes max)
+  lr_adaptive_stop_at_floor: true
+  attn_implementation: flash_attention_2
+  fewshot: 10
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --lora-r 64
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --num-epochs 100 --learning-rate 1.25e-6 --beta 0.01
+    --lr-adaptive --lr-adaptive-restore-best --lr-adaptive-save-optimizer
+    --lr-adaptive-eps 0.02 --lr-adaptive-ref-median-k 5
+    --lr-adaptive-min-stage-epochs 3
+    --lr-adaptive-min-lr 1e-7 --lr-adaptive-stop-at-floor
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp22.3_rank64_lr_div4
+    > logs/exp22.3_rank64_lr_div4.log 2>&1 &
+
+references_pour_lecture:
+  exp22_2_meme_rang_lr_5e-6: "47/100 @ step 50 puis 25 — spike KL 12k epoch 3, train plafonné à 0.44"
+  exp20_r16_calendaire: "58/100 @ step 800 — référence absolue"
+  objectif_1: "PAS de spike KL > 1 dans les 5 premières epochs (KL saine ~0.001-0.01) — sinon même 1.25e-6 est trop haut pour r=64"
+  objectif_2: "reward train : dépasser 0.44 (pic exp22.2), viser > 0.50 (plafond r=16) — c'est LE test de l'hypothèse capacité"
+  objectif_3: "test : dépasser 47 (best exp22.2), viser > 53 (exp22.1)"
+
+surveillance:
+  - "KL dans les logs : ~0.001-0.01 attendu à LR 1.25e-6 ; > 0.05 soutenu = tuer"
+  - "lignes [reward-adaptive-lr] : montée du rolling mean plus LENTE qu'exp22.2 attendue (LR ÷4) — premières coupes pas avant l'epoch ~6-8 si tout va bien"
+  - "~40 s/it → ~5 h pour atteindre l'epoch 14 (point de comparaison exp22.2)"
+
+results:
+  stopped: "2026-07-31 ~11:55 — arrêt manuel à step 1322 (epoch ~28.7, ~26 h)"
+  best_test: "49/100 @ steps 350 et 500 (epochs ~7.6 et ~10.9) — adapter → saves/keep_best/"
+  test_trajectory: "36 → 49 (montée saine epochs 1-11) → décrochage 34-41, plateau ~35-40 à partir de l'epoch ~15"
+  train_reward: "montée propre → 0.445 (epoch 6.5) ; pic absolu 0.4783 @ step 851 (epoch 18.5, après coupe #2) ; stagne 0.39-0.43 ensuite"
+  coupes: "COUPE #1 epoch 9.5 (LR→4.17e-7), COUPE #2 epoch 13.0 (LR→1.39e-7) — restore poids+optimizer OK"
+  stabilite: "AUCUN spike KL sur tout le run (KL ~0.0009) — objectif 1 atteint, le départ à 1.25e-6 est stable pour r=64"
+  incident: "1er lancement (29/07) tué par la fermeture de session Cursor à step 53 — relancé de zéro le 30/07 avec setsid"
+
+verdict: >
+  Mi-figue mi-raisin. Le LR ÷4 règle le problème de STABILITÉ (zéro spike KL,
+  vs 12k sur exp22.2) et la montée epochs 1-11 est saine (test 36→49). Mais
+  le plafond train r=16 n'est PAS dépassé : pic rolling mean 0.478 = même
+  niveau que les runs r=16 (0.47-0.50) → l'hypothèse capacité prend un
+  2e coup (après exp22.2). Et le test décroche après l'epoch ~11 alors que
+  le train se maintient : sur-spécialisation au train set, le LR restait
+  trop haut trop longtemps entre les coupes adaptatives (lecture Vadim :
+  bien parti jusqu'à epoch 4-5, puis LR trop grand). Suite : exp22.4 =
+  paliers CALENDAIRES ÷2 / 4 epochs (retour au calendaire d'exp20 mais en
+  décroissance plus douce et plus fréquente), même départ 1.25e-6, r=64.

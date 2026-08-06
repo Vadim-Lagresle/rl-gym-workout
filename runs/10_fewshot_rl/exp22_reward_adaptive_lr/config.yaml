@@ -1,0 +1,97 @@
+name: exp22_reward_adaptive_lr
+date: 2026-07-27
+description: >
+  Rejouer exp20 (GRPO multi-tour in-env, LoRA depuis zéro, few-shot k=10) en ne
+  changeant QU'UNE variable : la décroissance de LR. exp20 divisait LR/beta par 3
+  toutes les 3 epochs (calendaire) — verdict : stabilise et va plus haut que le
+  LR constant (58 vs 45), MAIS les paliers tombent à date fixe et cassent des
+  dynamiques d'apprentissage en cours (constat reward train du 27/07). Ici la
+  décroissance est ADAPTATIVE : on suit la moyenne roulante (fenêtre 1 epoch) du
+  reward train, évaluée toutes les demi-epochs ; si elle reste sous le best
+  historique (tolérance 0.005) pendant 3 checks consécutifs (= 1.5 epoch), LR et
+  beta sont divisés par 3, et le best est réinitialisé à la valeur courante
+  (cooldown naturel avant une nouvelle coupe). 100 epochs : le LR ne descend que
+  si le modèle plafonne, donc le budget long laisse les dynamiques aller au bout.
+  Objectif : battre le record few-shot RL (58/100 périodique exp20).
+  Non implémenté (évoqué « pourquoi pas ») : repartir du best checkpoint à chaque
+  coupe — écarté pour ce run (sélection test-set dans la trajectoire de training
+  + restauration mi-run risquée pour un run de nuit) ; option future.
+
+algorithm: GRPO (TRL 1.9 + vLLM colocate), LoRA r=16/α=32, few-shot k=10, LR adaptatif au reward train (RewardAdaptiveLrCallback)
+model: models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu
+script: src/train/train_grpo.py --fewshot 10 --lr-adaptive
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2
+wandb: ~   # lancé 2026-07-27 ~21:10, PID 3246197
+
+training:
+  fine_tuning: LoRA
+  num_generations: 8
+  gradient_accumulation_steps: 64   # 64 traj/step, 8 prompts/step
+  max_completion_length: 512
+  num_epochs: 100                   # ≈ 4600 steps (~47 steps/epoch) — run de nuit, stop manuel possible
+  learning_rate: 5e-6               # départ identique exp20 ; coupes ÷3 pilotées par le reward train
+  beta_kl: 0.01                     # suit le LR à chaque coupe (même politique qu'exp20)
+  lr_adaptive: true
+  lr_adaptive_window_epochs: 1.0    # moyenne roulante sur ~47 steps ≈ 3000 trajectoires (std ≈ 0.009)
+  lr_adaptive_check_every_epochs: 0.5
+  lr_adaptive_patience: 3           # 3 demi-epochs consécutives sous le best → coupe
+  lr_adaptive_eps: 0.005            # tolérance bruit sous le best
+  lr_adaptive_min_lr: 1e-9
+  lr_stage_factor: 3                # facteur de division (partagé avec les paliers calendaires)
+  attn_implementation: flash_attention_2
+  fewshot: 10                       # mêmes exemples qu'exp18/19/20 (format dialogue)
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47                    # ~1 checkpoint/epoch
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs   # checkpoints resumables sur l'overlay ; best adapter sur le home
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  nohup python src/train/train_grpo.py
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --num-epochs 100 --learning-rate 5e-6 --beta 0.01
+    --lr-adaptive
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp22_reward_adaptive_lr
+    > logs/exp22_reward_adaptive_lr.log 2>&1 &
+
+references_pour_lecture:
+  exp19_2_lr_constant_5e-6: "45/100 @ step 300 puis collapse KL"
+  exp20_paliers_calendaires: "58/100 @ step 800 (périodique), pas de collapse — la référence à battre"
+  objectif_1: "les coupes doivent tomber quand le reward train plafonne (lignes [reward-adaptive-lr] >>> COUPE), pas à date fixe"
+  objectif_2: "> 58 périodique (et re-éval indépendante du best à la clôture — leçon exp10.8/exp21 : les pics sont bruités)"
+  objectif_3: "pas de collapse KL : si la 1re coupe arrive trop tard vs exp19.2 (collapse epoch ~7.5 à 5e-6), le critère est trop laxiste"
+
+surveillance:
+  - "lignes [reward-adaptive-lr] toutes les ½ epochs (~23 steps) : rolling_mean, best, bad=k/3, et >>> COUPE"
+  - "wandb adaptive/ : rolling_reward_mean, best, n_bad, lr, n_cuts"
+  - "kl : régime sain ~0.001 ; dérive soutenue > 0.05 AVANT la 1re coupe = critère trop laxiste, tuer le run"
+  - "~47 s/it attendu (multi-tour, cf. exp20) → 100 epochs ≈ 60 h : stop manuel demain matin probable"
+
+results:
+  stopped: "2026-07-28 ~10:45 — arrêt manuel à step 759/4600 (epoch 16.5) pour lancer exp22.1"
+  best_test: "49/100 @ step 200 (adapter → saves/trl_grpo/exp22_reward_adaptive_lr_best)"
+  test_trajectory: "33 → 40 → 46 → 49 (step 200) → dégradation continue → 22-26/100 après step 400"
+  train_reward: "moyenne roulante : pic 0.4721 (epoch ~4.5-5) → chute vers 0.24-0.25 → stagnation"
+  coupes: "4 coupes ÷3 (epochs 6.5, 8.0, 9.5, 12.0) → LR final 6.2e-8, beta 1.2e-4"
+  checkpoints: "/tmp/trl_grpo_runs/exp22_reward_adaptive_lr (overlay volatil, jusqu'à checkpoint-752)"
+
+verdict: >
+  Le critère adaptatif seul est insuffisant — et confirme le diagnostic « trop
+  laxiste » ET révèle le vrai défaut : chaque coupe arrive APRÈS que la dérive a
+  été consommée (coupe #1 à l'epoch 6.5 alors que le pic train était à ~4.5-5 ;
+  entre-temps le test était passé de 49 à ~30), et comme on garde les poids
+  courants, le LR réduit CONSOLIDE l'état dégradé au lieu du meilleur état. Les
+  coupes suivantes n'ont fait que geler le modèle de plus en plus bas (test
+  22-26, train ~0.24 vs pic 0.47). Leçon : la coupe doit s'accompagner d'un
+  RETOUR AUX POIDS du best train (rolling mean) + reset des moments Adam — c'est
+  exactement exp22.1 (--lr-adaptive-restore-best). Note : mêmes dynamiques de
+  dérive post-pic qu'exp19.2 (5e-6 constant trop longtemps), mais sans collapse
+  KL brutal grâce aux coupes.

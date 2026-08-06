@@ -12,12 +12,13 @@ comment y remédier avec les outils modernes (curriculum, SCPO, BOND, CoT, mix S
 
 | Composant | Détail |
 |---|---|
-| Modèle base | Qwen2.5-3B-Instruct (cible paper) — Qwen3/3.5 désormais servables (stack v2) |
+| Modèle base | Qwen2.5-3B-Instruct (cible paper) — **sur `/tmp/models/` depuis 2026-07-29** (volatil, retélécharger via `setup/ensure_qwen_tmp.sh`) |
 | Framework RL | **TRL ≥1.9 GRPO + vLLM ≥0.25 colocate + flash-attention** (stack v2, 2026-07-22) |
-| Framework RL legacy | verl (exp1-6) ; TRL 1.4/vLLM 0.9.1 (exp7-19.2, env `~/envs/agentgym-rl` conservé en rollback) |
+| Framework RL legacy | verl (exp1-6) ; TRL 1.4/vLLM 0.9.1 (exp7-19.2 — env rollback supprimé le 2026-07-29) |
 | Env benchmark | TextCraft via serveur HTTP FastAPI (port 36005) |
 | GPU VM | **B200 192 Go HBM3e** (single GPU) — VM migrée CentOS Stream 10 / glibc 2.39 (2026-07-20) |
-| Envs Python | **v2 : `/tmp/envs/agentgym-rl-v2`** (⚠ /tmp volatil — reconstruire via `setup/setup_agentgym_rl_v2.sh`, ~10 min grâce au wheel flash-attn dans `saves/wheels/`) ; `agentenv-textcraft` (serveur jeu) |
+| Envs Python | **v2 : `/tmp/envs/agentgym-rl-v2`** (⚠ /tmp volatil — reconstruire via `setup/setup_agentgym_rl_v2.sh`, ~10 min grâce au wheel flash-attn dans `saves/wheels/` ; base pyenv 3.11.7) ; `~/envs/agentenv-textcraft` (serveur jeu, home) |
+| Disque home (35 Go) | Politique 2026-07-29 : ne stocker QUE les best adapters (+ optimizer) — `saves/keep_best/` (archive, voir son README), `saves/trl_grpo/<run>_besttrain` (runs en cours), `saves/wheels/`. Modèles de base et checkpoints périodiques sur `/tmp` (retéléchargeables/reconstructibles) |
 
 ## Architecture du projet (refacto 2026-07-16)
 
@@ -87,8 +88,9 @@ source ~/envs/agentenv-textcraft/bin/activate
 cd ~/rl-gym-workout/external/AgentGym/agentenv-textcraft
 textcraft --host 127.0.0.1 --port 36005
 
-# Panneau 2 — entraînement ou eval (env v2 ; le reconstruire s'il a été purgé de /tmp)
+# Panneau 2 — entraînement ou eval (env v2 + modèle ; les reconstruire si /tmp a été purgé)
 [ -d /tmp/envs/agentgym-rl-v2 ] || bash ~/rl-gym-workout/setup/setup_agentgym_rl_v2.sh
+bash ~/rl-gym-workout/setup/ensure_qwen_tmp.sh    # Qwen2.5-3B → /tmp/models (no-op si présent)
 export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH"   # requis : les sous-process vLLM cherchent ninja dans le PATH
 cd ~/rl-gym-workout
 ```
@@ -127,10 +129,14 @@ passes résumables (`passes.jsonl`). Pipeline exp16 : `src/eval/single_turn/`.
 
 ## Stack d'entraînement (à utiliser systématiquement)
 
+**Toujours lancer avec `setsid nohup ... &`** (leçon 2026-07-30) : la fermeture
+de la session Cursor tue le groupe de processus ~45 min après — `nohup` seul ne
+protège pas (SIGHUP seulement), `setsid` détache le run dans sa propre session.
+
 ```bash
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-nohup python src/train/train_grpo.py \
-    --full-ft \
+setsid nohup python src/train/train_grpo.py \
+ --full-ft \
     --num-generations 8 \
     --max-completion-length 512 \
     --max-items 0 \
@@ -150,7 +156,79 @@ nohup python src/train/train_grpo.py \
 - `vllm_importance_sampling_correction=False` figé dans le code : parité de sémantique avec la
   lignée exp10/19 (on-policy ratio ≡ 1) — à réactiver seulement comme ablation contrôlée
 
-## Philosophie de travail avec Claude
+### Règles d'entraînement (politique 2026-07-29)
+
+**1. Persistance : ne sauver sur le home QUE les best (+ optimizers)**
+
+| Artefact | Sélection | Emplacement | Taille typique (LoRA r=64) |
+|---|---|---|---|
+| **Best test** | Pass@1 périodique sur le test set (`TestEvalCallback`) | `saves/trl_grpo/<run>_best` | ~480 Mo (adapter seul) |
+| **Best train** | max de la moyenne roulante du reward TRAIN (`RewardAdaptiveLrCallback`) | `saves/trl_grpo/<run>_besttrain` | ~480 Mo adapter + ~960 Mo `optimizer.pt` |
+| Archive des best clos | — | `saves/keep_best/` (README par run) | idem |
+
+- Checkpoints périodiques (`--output-root /tmp/trl_grpo_runs`) : sur `/tmp`, volatils — ne
+  **pas** compter dessus pour reprendre après purge pod.
+- Modèle de base : `/tmp/models/` (retélécharger via `setup/ensure_qwen_tmp.sh`).
+- À chaque nouveau best train, l'adapter est remplacé (swap atomique `.tmp` → dir) ;
+  `.besttrain_info` trace step/epoch/mean/lr/beta.
+- **Toujours activer `--lr-adaptive-save-optimizer`** sur les runs adaptatifs LoRA :
+  l'état Adam (moments fp32) est sauvé avec le best et **restauré à chaque coupe de LR**
+  (poids + moments cohérents, reprise exacte après coupure infra). Sans ce flag, les
+  moments sont remis à zéro au restore (exp22.1).
+
+**2. Stabilisation LR + beta KL — trois modes (exclusifs)**
+
+Tous divisent LR et beta par le même facteur. Source unique :
+`apply_lr_beta()` dans `src/train/schedules.py`.
+
+| Mode | CLI | Quand couper | Leçon |
+|---|---|---|---|
+| **Paliers calendaires** | `--lr-stage-every-epochs 3` | toutes les N epochs, quoi qu'il arrive | exp20 : stabilise, pic 58, mais coupe des dynamiques en cours ; exp22.4 : consolide la dérive post-pic |
+| **Adaptatif au reward train** | `--lr-adaptive` (+ flags ci-dessous) | si la moyenne roulante stagne sous la référence pendant `patience` checks | exp22/22.1 : restore utile, mais coupes sur bruit si critère trop laxiste → exp22.2 ; exp22.3 : coupe APRÈS le décrochage |
+| **Calendaire long + restore du best de palier** | `--lr-stage-every-epochs 10 --lr-stage-restore-best` | toutes les 10 epochs, en REPARTANT du best du palier (poids + optimizer, `<run>_stagebest`) ; best global promu dans `<run>_besttrain` | exp22.5 (2026-07-31) : la dérive de fin de palier est jetée au lieu d'être consolidée |
+
+**Run adaptatif standard (exp22.2 — à utiliser pour les nouveaux runs LoRA few-shot) :**
+
+```bash
+PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
+setsid nohup python src/train/train_grpo.py \
+ --lora-r 64 \
+    --num-generations 8 --gradient-accumulation-steps 64 \
+    --max-completion-length 512 --max-items 0 \
+    --num-epochs 100 --learning-rate 5e-6 --beta 0.01 \
+    --lr-adaptive --lr-adaptive-restore-best --lr-adaptive-save-optimizer \
+    --lr-adaptive-eps 0.02 --lr-adaptive-ref-median-k 5 \
+    --lr-adaptive-min-stage-epochs 3 \
+    --lr-adaptive-min-lr 1e-7 --lr-adaptive-stop-at-floor \
+    --fewshot 10 --vllm-max-len 20480 \
+    --eval-every 50 --eval-items 100 \
+    --save-steps 47 --save-total-limit 20 \
+    --output-root /tmp/trl_grpo_runs \
+    --use-vllm-inprocess --run-name <run_name> \
+    > logs/<run_name>.log 2>&1 &
+```
+
+Mécanique adaptative (détail dans `RewardAdaptiveLrCallback`, `schedules.py`) :
+- **Fenêtre** : moyenne roulante du reward train sur 1 epoch (~47 steps × 64 traj).
+- **Check** : toutes les ½ epoch. **Patience** : 3 checks consécutifs sous la référence.
+- **Référence de stagnation** : médiane des 5 derniers checks du palier (`--lr-adaptive-ref-median-k 5`) — pas le max historique (biaisé +1-2σ, leçon exp22.1).
+- **Tolérance** : `eps=0.02` (~2σ du bruit inter-fenêtres mesuré).
+- **Palier minimum** : `--lr-adaptive-min-stage-epochs 3` — une coupe déclenchée avant est *retenue* ; exécutée au premier check suivant si la stagnation persiste (vraies mesures stables par palier).
+- **À la coupe** : LR et beta ÷3 → **restore des poids du best train** (+ optimizer si activé) → cooldown (historique vidé, prochain check après 1 fenêtre complète post-coupe). TRL resync vLLM au step suivant.
+- **Plancher** : `--lr-adaptive-min-lr 1e-7 --lr-adaptive-stop-at-floor` — arrêt propre du run (plus de epochs à LR≈0).
+- Le best train est 100 % TRAIN : aucun peeking test ; le Pass@1 périodique reste un estimateur honnête.
+
+**Surveillance** (lignes `[reward-adaptive-lr]` dans le log + wandb `adaptive/*`) :
+- `best train sauvé` / `poids RESTAURÉS` / `moments Adam restaurés (état du best)`
+- `coupe retenue : palier X ep < min 3 ep` = signal avant palier complet
+- `>>> COUPE #N` = LR réduit + restore
+- KL saine ~0.001 ; dérive soutenue > 0.05 avant la 1re coupe = critère trop laxiste
+- Entropie : collapse < 0.15 dès ~step 400 = politique quasi déterministe, starvation d'exploration GRPO
+
+**LoRA** : défaut historique r=16/α=32 ; exp22.2 teste r=64/α=128 (`--lora-r`, `--lora-alpha`).
+Ancre KL = Qwen nu (adapter recréé à zéro ou poids injectés via `set_peft_model_state_dict`
+sans recréer d'adapter — cf. doc hebdo 21/07 continuation d'adapter).
+
 
 **Une tâche à la fois, expliquée avant d'être exécutée.**
 

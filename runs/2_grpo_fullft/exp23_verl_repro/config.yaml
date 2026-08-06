@@ -1,0 +1,79 @@
+# exp23_verl_repro — recette verl du papier (75/100) traduite sur TRL, au plus près
+#
+# Objectif : répliquer la LOGIQUE d'entraînement d'AgentGym-RL (external/AgentGym-RL,
+# textcraft_train.sh) sur notre stack TRL v2, pour isoler ce qui manque à nos runs
+# LoRA (mur train ~0.47-0.50, best 54). Les 6 ingrédients répliqués :
+#   1. Full-FT (3B params, pas d'adapter)
+#   2. LR 1e-6 CONSTANT + beta KL 0.001 (low_var_kl = k3, même estimateur que TRL)
+#   3. Vrai PPO : buffer de 256 trajectoires, consommé en 4 optimizer steps clippés
+#      (eps 0.2) — traduction de ppo_mini_batch_size=8 prompts × n=8 = 64 traj/update
+#      (agent_fsdp_workers.py:116 : mini_batch *= rollout.n). TRL : steps_per_generation
+#      =256 + grad_accum=64 → old_logps figées au modèle pré-updates, ratio réel.
+#      NB : le rapport du 2026-08-04 disait « 32 updates de 8 » — FAUX, corrigé.
+#   4. max_rounds 30 à l'ENTRAÎNEMENT (= éval), vs notre cap 20 historique.
+#      (Nuance : l'appendice B.3 du papier dit 20 pour le GRPO pur ; le script du
+#      75 tourne rounds=30 fixe — on suit le script.)
+#   5. Bonus d'entropie 0.001 (dp_actor.py:253 : loss = pg − 0.001·H) → entropy_coef
+#      natif TRL 1.9.2, même signe/forme (moyenne par token actif).
+#   6. Zero-shot (pas de few-shot), batch 256 (vs 64).
+#
+# Écarts assumés vs verl :
+#   - 1×B200 vs 4+ GPU FSDP ; optimizer adamw_bnb_8bit (vs fp32) pour tenir en mémoire
+#   - ppo_inner_epochs=2 du script IGNORÉ par leur fork (une seule passe) → num_iterations=1
+#   - loss_type="dapo" (agrégation token-level ≈ masked_mean verl)
+#   - vllm_importance_sampling_correction=False (parité lignée exp10 ; les old_logps
+#     du vrai PPO sont calculées par TRL indépendamment de ce flag)
+#   - leur modèle du script est Qwen2.5-7B ; la ligne 3B du papier (75) = même recette
+#   - dataset : nos 374 items TextCraft train (a priori identiques aux leurs)
+
+run_name: exp23_verl_repro
+date: 2026-08-05
+model: Qwen2.5-3B-Instruct (/tmp/models)
+stack: TRL 1.9.2 + vLLM colocate + flash-attention (env v2)
+
+method: GRPO full-FT zero-shot, vrai PPO (buffer 256, 4 updates clippées/cycle)
+
+hyperparams:
+  full_ft: true
+  learning_rate: 1.0e-6        # constant (verl policy_learning_rate)
+  beta_kl: 0.001               # verl kl_loss_coef, low_var_kl ≡ k3 TRL
+  entropy_coef: 0.001          # verl entropy_coeff
+  epsilon_clip: 0.2            # défaut TRL = verl clip_ratio
+  num_generations: 8           # verl rollout.n
+  steps_per_generation: 256    # buffer = verl train_batch_size 32 prompts × 8
+  gradient_accumulation_steps: 64  # mini-batch verl : 8 prompts × 8 = 64 traj/update
+  num_iterations: 1            # leur fork ignore ppo_epochs=2 (une passe)
+  max_rounds_train: 30         # --max-rounds-schedule '30:0' (verl rounds_ctrl fixed 30)
+  max_completion_length: 512   # verl rollout.max_tokens
+  vllm_max_len: 32768          # verl max_model_len
+  fewshot: 0                   # zero-shot
+  num_epochs: 30               # verl total_epoches
+  lr_scheduler: constant
+  optim: adamw_bnb_8bit        # défaut full-ft (écart : verl = fp32 Adam FSDP)
+  temperature: 1.0
+
+# ~46.75 optimizer steps/epoch (374 items × 8 / 64) → ~1400 steps, ~350 cycles de 256 traj.
+# Éval périodique : 47 steps (~1 epoch), 100 items. Best test → saves/trl_grpo/<run>_best
+# (modèle FULL ~5.8 Go sur le home — 14 Go libres au lancement).
+eval_every_steps: 47
+eval_items: 100
+checkpoints: /tmp/trl_grpo_runs (volatils, save_steps 94, limit 1, save_only_model)
+
+validation:
+  - smoke GPU 2026-08-05 : full-FT + steps_per_generation 32 / grad_accum 8 (4 updates
+    par cycle) + entropy_coef 0.001 + rounds fixes — voir logs/smoke_exp23.log
+
+launch:
+  date: 2026-08-05 ~11h20
+  pid: 2059898 (setsid, session propre)
+  log: logs/exp23_verl_repro.log
+  wandb: https://wandb.ai/v-lagresle-criteo/rl-gym-workout (run exp23_verl_repro)
+  total_steps: 1320 (44 steps/epoch × 30 epochs, 11 cycles de 256 traj/epoch)
+  eta: ~16-20 h (~56 s/step moyen : ~2 min de rollout 256×30 rounds par cycle + 3 steps bufferisés à ~24 s)
+  gpu: ~91 Go / 192 Go
+  sante_step7: "reward zero-shot 0.2266 (>0.18 historique à 20 rounds — les 10 tours en plus
+    aident déjà) ; clip_ratio non nuls aux updates 2-4 (PPO actif) ; entropie ~0.9 ;
+    KL ~0.001 ; grad_norm ~0.4"
+
+results: (à compléter)
+verdict: (à compléter)

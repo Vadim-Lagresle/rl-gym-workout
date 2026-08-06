@@ -7,7 +7,7 @@ sparse 0/1 de l'environnement, et met à jour ses poids par GRPO.
 Architecture (refacto 2026-07-16) — ce fichier ne contient que la CLI et
 l'assemblage ; la logique vit dans les modules de src/train/ :
     data.py          dataset train + prompts (curriculum depth inclus)
-    schedules.py     ScalingInter (budget d'interaction progressif)
+    schedules.py     ScalingInter (budget d'interaction progressif) et lr scheduler
     rollout.py       LA boucle env par tour + mise à plat contrat TRL + reward
     vllm_engine.py   moteur vLLM in-process + sync de poids par step
     periodic_eval.py éval test périodique + save du best checkpoint
@@ -71,8 +71,26 @@ def build_parser() -> argparse.ArgumentParser:
                              "Papier TextCraft: 256 (= 32 prompts × N=8).")
     parser.add_argument("--max-completion-length", type=int, default=128,
                         help="Max tokens per assistant turn (128 = smoke test, 512 = proper run).")
+    parser.add_argument("--steps-per-generation", type=int, default=0,
+                        help="Taille du buffer de rollouts en trajectoires (mode « vrai PPO », "
+                             "exp23). 0 = défaut TRL (= grad_accum : 1 génération par optimizer "
+                             "step, strictement on-policy, ratio ≡ 1). Si > grad_accum : TRL "
+                             "génère steps_per_generation trajectoires d'un coup, calcule les "
+                             "old_per_token_logps sous le modèle PRÉ-updates, puis consomme le "
+                             "buffer en steps_per_generation/grad_accum optimizer steps CLIPPÉS "
+                             "(epsilon 0.2) — la mécanique mini-batch de verl (ppo_mini_batch_size "
+                             "× n = 64 traj/update, batch 256). Doit être un multiple de grad_accum.")
+    parser.add_argument("--entropy-coef", type=float, default=0.0,
+                        help="Coefficient du bonus d'entropie dans la loss (loss -= coef × "
+                             "entropie moyenne par token actif). verl/papier : 0.001 "
+                             "(dp_actor.py:253). 0 = off (défaut, sémantique exp10-22).")
     parser.add_argument("--full-ft", action="store_true", default=False,
                         help="Full fine-tuning (no LoRA). Requires more VRAM — use on B200.")
+    parser.add_argument("--lora-r", type=int, default=16,
+                        help="Rang LoRA (défaut 16 = lignée exp10-22.1). exp22.2 : 64 — plus de "
+                             "capacité d'adaptation, adapter ~4x plus gros (~500 Mo).")
+    parser.add_argument("--lora-alpha", type=int, default=0,
+                        help="Alpha LoRA (0 = auto : 2×r, le ratio de la lignée exp10).")
     parser.add_argument("--beta", type=float, default=0.001,
                         help=(
                             "Coefficient de la penalite KL (ancrage a la reference). "
@@ -85,6 +103,16 @@ def build_parser() -> argparse.ArgumentParser:
                             "LR optimizer. Défaut 1e-6 (aligné full-ft / papier). En LoRA, "
                             "le blog Thinking Machines 'LoRA Without Regret' recommande ~10x "
                             "le LR full-ft -> 1e-5 (voire 1.5e-5 pour les runs <100 steps)."
+                        ))
+    parser.add_argument("--lr-scheduler-type", type=str, default="constant",
+                        choices=["constant", "constant_with_warmup", "linear",
+                                 "cosine", "cosine_with_restarts"],
+                        help=(
+                            "Scheduler LR HF Trainer. Défaut 'constant' (aligné verl/papier, "
+                            "cf. audit 11 juin 2026 : le défaut HF 'linear' décroît vers 0 et "
+                            "divise le LR moyen par ~2 sur un run). Incompatible avec "
+                            "--lr-stage-every-epochs (qui suppose un multiplicateur de schedule "
+                            "constant ≡ 1)."
                         ))
     parser.add_argument("--optim", type=str, default="",
                         help=(
@@ -130,6 +158,66 @@ def build_parser() -> argparse.ArgumentParser:
             "l'epoch 0, 11 dès l'epoch 2, ... Exclusif avec --max-rounds-schedule."
         ),
     )
+    parser.add_argument("--lr-stage-every-epochs", type=float, default=0,
+                        help="Paliers LR/beta : divise le LR (et beta, sauf --lr-stage-keep-beta) "
+                             "par --lr-stage-factor toutes les N epochs. 0 = off. Automatise "
+                             "l'échelle de LR de la lignée exp10 en un seul run (exp20).")
+    parser.add_argument("--lr-stage-factor", type=float, default=3.0,
+                        help="Facteur de division du LR (et beta) à chaque palier (défaut 3).")
+    parser.add_argument("--lr-stage-keep-beta", action="store_true", default=False,
+                        help="Avec --lr-stage-every-epochs : ne divise QUE le LR, beta reste "
+                             "constant (ablation ; défaut : beta suit le LR).")
+    parser.add_argument("--lr-stage-restore-best", action="store_true", default=False,
+                        help="Avec --lr-stage-every-epochs (exp22.5, LoRA uniquement) : suit la "
+                             "moyenne roulante du reward train, sauve le best du PALIER "
+                             "(adapter + optimizer) dans saves/trl_grpo/<run>_stagebest et le "
+                             "best GLOBAL dans <run>_besttrain ; à chaque frontière de palier, "
+                             "RECHARGE le best du palier écoulé (poids + moments Adam) avant "
+                             "d'appliquer le LR réduit.")
+    parser.add_argument("--lr-adaptive", action="store_true", default=False,
+                        help="Décroissance de LR ADAPTATIVE au reward train (exp22) : divise "
+                             "LR et beta par --lr-stage-factor quand la moyenne roulante du "
+                             "reward train (fenêtre --lr-adaptive-window-epochs) reste sous le "
+                             "best pendant --lr-adaptive-patience demi-epochs consécutives. "
+                             "Exclusif avec --lr-stage-every-epochs.")
+    parser.add_argument("--lr-adaptive-window-epochs", type=float, default=1.0,
+                        help="Fenêtre de la moyenne roulante du reward train, en epochs (défaut 1).")
+    parser.add_argument("--lr-adaptive-check-every-epochs", type=float, default=0.5,
+                        help="Période des checks, en epochs (défaut 0.5 = demi-epoch).")
+    parser.add_argument("--lr-adaptive-patience", type=int, default=3,
+                        help="Nb de checks consécutifs sous le best avant de couper le LR (défaut 3).")
+    parser.add_argument("--lr-adaptive-eps", type=float, default=0.005,
+                        help="Tolérance de bruit sous le best (échelle reward 0-1, défaut 0.005 "
+                             "≈ std de la moyenne sur ~3000 trajectoires).")
+    parser.add_argument("--lr-adaptive-min-lr", type=float, default=1e-9,
+                        help="Plancher de LR : plus aucune coupe en dessous (défaut 1e-9).")
+    parser.add_argument("--lr-adaptive-restore-best", action="store_true", default=False,
+                        help="Avec --lr-adaptive (exp22.1, LoRA uniquement) : sauve l'adapter à "
+                             "chaque nouveau best de moyenne roulante du reward TRAIN "
+                             "(saves/trl_grpo/<run>_besttrain, home persistant, remplacé à chaque "
+                             "nouveau best) et, à chaque coupe de LR, RECHARGE ces poids + remet "
+                             "les moments Adam à zéro : on consolide le meilleur état connu au "
+                             "lieu de figer la dérive post-pic (leçon exp22).")
+    parser.add_argument("--lr-adaptive-min-stage-epochs", type=float, default=0.0,
+                        help="Durée MINIMALE d'un palier de LR, en epochs (exp22.2 : 3). Tant "
+                             "qu'elle n'est pas écoulée, une coupe déclenchée par la patience est "
+                             "retenue (et exécutée au premier check suivant si le signal persiste). "
+                             "0 = off (sémantique exp22.1).")
+    parser.add_argument("--lr-adaptive-ref-median-k", type=int, default=0,
+                        help="K>0 : la détection de stagnation compare la fenêtre courante à la "
+                             "MÉDIANE des K derniers checks du palier (robuste au bruit) au lieu "
+                             "du max historique (biaisé +1-2 sigma, leçon exp22.1 : coupes sur du "
+                             "bruit à cadence minimale). Le max reste utilisé pour SAVE le best. "
+                             "0 = max historique (sémantique exp22.1). exp22.2 : 5.")
+    parser.add_argument("--lr-adaptive-save-optimizer", action="store_true", default=False,
+                        help="Avec --lr-adaptive-restore-best : sauve AUSSI l'état de l'optimizer "
+                             "(moments Adam fp32, ~2-4x la taille de l'adapter) avec le best, et "
+                             "le restaure à la coupe au lieu de remettre les moments à zéro — "
+                             "reprise cohérente poids+optimizer, et resume exact après coupure.")
+    parser.add_argument("--lr-adaptive-stop-at-floor", action="store_true", default=False,
+                        help="Arrête le run quand une coupe passerait sous --lr-adaptive-min-lr "
+                             "(leçon exp22.1 : 18 epochs brûlées à LR ~0). À combiner avec un "
+                             "plancher réaliste, ex. --lr-adaptive-min-lr 1e-7.")
     parser.add_argument("--eval-every", type=int, default=0,
                         help="Éval Pass@1 sur le test set tous les N steps, logguée dans wandb "
                              "sous eval/pass_at_1 (0 = off ; nécessite --use-vllm-inprocess)")
@@ -182,6 +270,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--vllm-max-len", type=int, default=16384,
                         help="max_model_len du moteur vLLM in-process (monter à ~20480 avec "
                              "--fewshot >= 10 : les exemples ajoutent ~2-5k tokens au contexte)")
+    parser.add_argument("--plan-mode", action="store_true", default=False,
+                        help="Single-turn « pure reasoning » (exp21) : le modèle émet en UNE "
+                             "complétion le raisonnement + la séquence d'actions complète, "
+                             "rejouée telle quelle dans l'env (rollout_plan.py). Remplace la "
+                             "boucle multi-tour, les prompts ET l'éval périodique. "
+                             "Incompatible avec --max-rounds-schedule* et --fewshot-format bloc.")
     parser.add_argument("--output-root", type=str, default="",
                         help="Racine des checkpoints périodiques (défaut : saves/trl_grpo, disque home). "
                              "Ex. /tmp/trl_grpo_runs pour garder les checkpoints resumables sur l'overlay "
@@ -197,6 +291,13 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
     passe ici sa rollout_func SNIS — c'est le SEUL point de variation entre les deux."""
     if args is None:
         args = build_parser().parse_args()
+    if args.plan_mode:
+        if rollout_func is not None:
+            raise SystemExit("--plan-mode est incompatible avec une rollout_func externe (SNIS).")
+        if args.max_rounds_schedule or args.max_rounds_schedule_epochs:
+            raise SystemExit("--plan-mode est single-turn : pas de schedule de max_rounds.")
+        from src.train.rollout_plan import plan_rollout_func
+        rollout_func = plan_rollout_func
     if rollout_func is None:
         rollout_func = grpo_rollout_func
 
@@ -218,11 +319,19 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
 
     fewshot_block, fewshot_messages = (None, None)
     if args.fewshot > 0:
-        from src.eval.textcraft_common import load_fewshot
-        fewshot_block, fewshot_messages = load_fewshot(
-            args.fewshot_file, args.fewshot, args.fewshot_format)
-        print(f"[fewshot] k={args.fewshot} exemples ({args.fewshot_format}) injectés dans "
-              f"chaque rollout + éval périodique ({len(fewshot_messages or [])} tours)", flush=True)
+        if args.plan_mode:
+            # Mêmes exemples résolus qu'exp18/19/20, reformatés single-turn
+            # (tâche → Thought + séquence d'actions complète).
+            from src.train.rollout_plan import load_plan_fewshot
+            fewshot_messages = load_plan_fewshot(args.fewshot_file, args.fewshot)
+            print(f"[fewshot] k={args.fewshot} exemples single-turn (plan) injectés dans "
+                  f"chaque rollout + éval périodique", flush=True)
+        else:
+            from src.eval.textcraft_common import load_fewshot
+            fewshot_block, fewshot_messages = load_fewshot(
+                args.fewshot_file, args.fewshot, args.fewshot_format)
+            print(f"[fewshot] k={args.fewshot} exemples ({args.fewshot_format}) injectés dans "
+                  f"chaque rollout + éval périodique ({len(fewshot_messages or [])} tours)", flush=True)
 
     model_path = Path(args.model_path) if args.model_path else DEFAULT_MODEL_PATH
     if not model_path.is_absolute():
@@ -246,9 +355,33 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         f"{prompts_per_step} prompts/step, N={args.num_generations}",
         flush=True,
     )
-    rows = build_prompt_rows(max_items=args.max_items, max_depth=args.max_depth,
-                             system_prompt=args.system_prompt, depth_in=depth_in,
-                             fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
+    if args.steps_per_generation:
+        if args.steps_per_generation % args.gradient_accumulation_steps != 0:
+            raise SystemExit(
+                f"--steps-per-generation ({args.steps_per_generation}) doit être un multiple de "
+                f"--gradient-accumulation-steps ({args.gradient_accumulation_steps}).")
+        if args.steps_per_generation % args.num_generations != 0:
+            raise SystemExit(
+                f"--steps-per-generation ({args.steps_per_generation}) doit être un multiple de "
+                f"--num-generations ({args.num_generations}).")
+        print(
+            f"[train] vrai PPO : buffer de {args.steps_per_generation} traj "
+            f"({args.steps_per_generation // args.num_generations} prompts), consommé en "
+            f"{args.steps_per_generation // args.gradient_accumulation_steps} optimizer steps "
+            f"clippés (eps 0.2) — old_logps figées au modèle pré-updates (mécanique verl).",
+            flush=True,
+        )
+    if args.plan_mode:
+        from src.train.rollout_plan import build_plan_prompt_rows
+        if args.max_depth or depth_in:
+            raise SystemExit("--plan-mode ne supporte pas (encore) le filtrage par depth.")
+        rows = build_plan_prompt_rows(max_items=args.max_items,
+                                      system_prompt=args.system_prompt,
+                                      fewshot_messages=fewshot_messages)
+    else:
+        rows = build_prompt_rows(max_items=args.max_items, max_depth=args.max_depth,
+                                 system_prompt=args.system_prompt, depth_in=depth_in,
+                                 fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
     dataset = Dataset.from_list(rows)
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
@@ -297,12 +430,22 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         # The paper's script sets ppo_inner_epochs=2 BUT the AgentGym-RL verl fork ignores
         # it: update_policy() does a single pass over the batch (ppo_epochs only appears in
         # the MFU metric, agent_fsdp_workers.py:413). The actual paper run is 1 epoch.
-        # With num_iterations=1 and steps_per_generation == grad_accum, TRL skips the
-        # old_logprobs forward and trains fully on-policy (ratio ≡ 1).
+        # With num_iterations=1 and steps_per_generation == grad_accum (default), TRL skips
+        # the old_logprobs forward and trains fully on-policy (ratio ≡ 1).
         num_iterations=1,
-        # verl uses a constant LR schedule (warmup_style: constant, ppo_trainer.yaml).
-        # HF Trainer default is "linear" decay to 0, which silently halves the average LR.
-        lr_scheduler_type="constant",
+        # --steps-per-generation > grad_accum (exp23) = mini-batching PPO de verl : le
+        # buffer de rollouts est consommé en plusieurs optimizer steps ; TRL détecte le
+        # désalignement (grad_accum % (steps_per_generation × num_iterations) != 0) et
+        # calcule les old_per_token_logps → ratio clippé réel dès la 2e update.
+        steps_per_generation=(args.steps_per_generation or None),
+        # Bonus d'entropie (verl entropy_coeff=0.001) : loss -= coef × entropie moyenne
+        # par token actif (même signe/forme que dp_actor.py:253). 0.0 = terme absent.
+        entropy_coef=args.entropy_coef,
+        # verl (repro papier, cf. audit 11 juin 2026) utilise un schedule constant ;
+        # le défaut HF Trainer ("linear") décroît vers 0 et divise le LR moyen par
+        # ~2. Configurable via --lr-scheduler-type (défaut "constant" : aucun
+        # changement de comportement si le flag n'est pas passé).
+        lr_scheduler_type=args.lr_scheduler_type,
         # Explicit: "dapo" is the TRL 1.4 default. Its token-level aggregation
         # (sum / total_tokens) matches verl's masked_mean closer than loss_type="grpo"
         # (per-sequence mean), pinned here for reproducibility across TRL versions.
@@ -344,9 +487,10 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
                            "attn_implementation": args.attn_implementation},
     )
 
+    lora_alpha = args.lora_alpha or 2 * args.lora_r
     peft_config = None if args.full_ft else LoraConfig(
-        r=16,
-        lora_alpha=32,
+        r=args.lora_r,
+        lora_alpha=lora_alpha,
         lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
@@ -354,18 +498,98 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
     )
     if args.full_ft:
         print("[train] Full fine-tuning (no LoRA).", flush=True)
+    else:
+        print(f"[train] LoRA r={args.lora_r} alpha={lora_alpha}", flush=True)
 
     callbacks = [MemDiagCallback()]
     # (Plus de VllmSyncCallback : la sync par step est faite nativement par TRL,
     #  et TestEvalCallback force sa propre sync avant chaque éval.)
 
+    lr_stage_cb = None
+    if args.lr_stage_every_epochs > 0 and args.lr_adaptive:
+        raise SystemExit("--lr-stage-every-epochs et --lr-adaptive sont exclusifs "
+                         "(deux pilotes du même LR).")
+    if args.lr_adaptive_restore_best and not args.lr_adaptive:
+        raise SystemExit("--lr-adaptive-restore-best n'a de sens qu'avec --lr-adaptive.")
+    if args.lr_stage_restore_best and args.lr_stage_every_epochs <= 0:
+        raise SystemExit("--lr-stage-restore-best n'a de sens qu'avec --lr-stage-every-epochs.")
+    if args.lr_stage_restore_best and args.full_ft:
+        raise SystemExit("--lr-stage-restore-best nécessite LoRA (le save/restore porte "
+                         "sur l'adapter seul, pas sur un modèle full-FT).")
+    if args.lr_adaptive_save_optimizer and not args.lr_adaptive_restore_best:
+        raise SystemExit("--lr-adaptive-save-optimizer n'a de sens qu'avec --lr-adaptive-restore-best.")
+    if (args.lr_stage_every_epochs > 0 or args.lr_adaptive) and args.lr_scheduler_type != "constant":
+        raise SystemExit(
+            "Les paliers LR (calendaires ou adaptatifs) supposent lr_scheduler_type="
+            "'constant' (modification de base_lrs avec multiplicateur de schedule ≡ 1) ; "
+            f"--lr-scheduler-type={args.lr_scheduler_type!r} n'est pas supporté."
+        )
+    if args.lr_stage_every_epochs > 0 and args.lr_stage_restore_best:
+        stagebest_dir = str(REPO_ROOT / "saves" / "trl_grpo" / f"{args.run_name}_stagebest")
+        globalbest_dir = str(REPO_ROOT / "saves" / "trl_grpo" / f"{args.run_name}_besttrain")
+        lr_stage_cb = schedules.StagedBestRestoreCallback(
+            base_lr=args.learning_rate, base_beta=args.beta,
+            every_epochs=args.lr_stage_every_epochs, factor=args.lr_stage_factor,
+            window_epochs=args.lr_adaptive_window_epochs,
+            check_every_epochs=args.lr_adaptive_check_every_epochs,
+            scale_beta=not args.lr_stage_keep_beta,
+            stage_dir=stagebest_dir, global_dir=globalbest_dir, save_optimizer=True)
+        callbacks.append(lr_stage_cb)
+        print(f"[lr-stage-restore] LR{' et beta' if not args.lr_stage_keep_beta else ''} "
+              f"÷{args.lr_stage_factor:g} toutes les {args.lr_stage_every_epochs:g} epochs, "
+              f"restore du best du palier (poids + optimizer) à chaque frontière "
+              f"(départ lr={args.learning_rate:g}, beta={args.beta:g}) — "
+              f"stage best: {stagebest_dir}, best global: {globalbest_dir}", flush=True)
+    elif args.lr_stage_every_epochs > 0:
+        lr_stage_cb = schedules.StagedLrBetaCallback(
+            base_lr=args.learning_rate, base_beta=args.beta,
+            every_epochs=args.lr_stage_every_epochs, factor=args.lr_stage_factor,
+            scale_beta=not args.lr_stage_keep_beta)
+        callbacks.append(lr_stage_cb)
+        print(f"[lr-beta-stage] LR{' et beta' if not args.lr_stage_keep_beta else ''} "
+              f"÷{args.lr_stage_factor:g} toutes les {args.lr_stage_every_epochs:g} epochs "
+              f"(départ lr={args.learning_rate:g}, beta={args.beta:g})", flush=True)
+    elif args.lr_adaptive:
+        besttrain_dir = None
+        if args.lr_adaptive_restore_best:
+            if args.full_ft:
+                raise SystemExit("--lr-adaptive-restore-best nécessite LoRA (le save/restore "
+                                 "porte sur l'adapter seul, pas sur un modèle full-FT).")
+            besttrain_dir = str(REPO_ROOT / "saves" / "trl_grpo" / f"{args.run_name}_besttrain")
+        lr_stage_cb = schedules.RewardAdaptiveLrCallback(
+            base_lr=args.learning_rate, base_beta=args.beta,
+            factor=args.lr_stage_factor,
+            window_epochs=args.lr_adaptive_window_epochs,
+            check_every_epochs=args.lr_adaptive_check_every_epochs,
+            patience=args.lr_adaptive_patience, eps=args.lr_adaptive_eps,
+            min_lr=args.lr_adaptive_min_lr,
+            scale_beta=not args.lr_stage_keep_beta,
+            best_dir=besttrain_dir,
+            min_stage_epochs=args.lr_adaptive_min_stage_epochs,
+            ref_median_k=args.lr_adaptive_ref_median_k,
+            save_optimizer=args.lr_adaptive_save_optimizer,
+            stop_at_floor=args.lr_adaptive_stop_at_floor)
+        callbacks.append(lr_stage_cb)
+        print(f"[reward-adaptive-lr] LR{' et beta' if not args.lr_stage_keep_beta else ''} "
+              f"÷{args.lr_stage_factor:g} si la moyenne roulante du reward train "
+              f"(fenêtre {args.lr_adaptive_window_epochs:g} ep) reste sous le best pendant "
+              f"{args.lr_adaptive_patience} checks (1 check / {args.lr_adaptive_check_every_epochs:g} ep) "
+              f"(départ lr={args.learning_rate:g}, beta={args.beta:g})"
+              + (f" — save/restore du best train dans {besttrain_dir}" if besttrain_dir else ""),
+              flush=True)
+
     test_eval_cb = None
     if args.eval_every > 0:
         if not args.use_vllm_inprocess:
             raise SystemExit("--eval-every nécessite --use-vllm-inprocess (le moteur vLLM sert aussi à l'éval)")
+        plan_eval_fn = None
+        if args.plan_mode:
+            from src.train.rollout_plan import run_plan_test_eval
+            plan_eval_fn = run_plan_test_eval
         test_eval_cb = TestEvalCallback(eval_every=args.eval_every, eval_items=args.eval_items,
                                         best_init_score=args.best_init_score, run_name=args.run_name,
-                                        fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
+                                        fewshot_block=fewshot_block, fewshot_messages=fewshot_messages,
+                                        eval_fn=plan_eval_fn)
         callbacks.append(test_eval_cb)
         print(f"[test_eval] Éval test set tous les {args.eval_every} steps "
               f"({args.eval_items or 'tous les'} items).", flush=True)
@@ -382,6 +606,8 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
     )
     if test_eval_cb is not None:
         test_eval_cb.trainer_ref = trainer
+    if lr_stage_cb is not None:
+        lr_stage_cb.trainer_ref = trainer
 
     resume = args.resume_from_checkpoint if args.resume_from_checkpoint else None
     trainer.train(resume_from_checkpoint=resume)

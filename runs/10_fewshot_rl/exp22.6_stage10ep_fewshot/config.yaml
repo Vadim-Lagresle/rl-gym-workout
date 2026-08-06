@@ -1,0 +1,74 @@
+name: exp22.6_stage10ep_fewshot
+date: 2026-08-03
+description: >
+  Bras FEW-SHOT de l'ablation propre demandée par Vadim (03/08) : exactement
+  la recette d'exp22.5 (paliers calendaires de 10 epochs, LR et beta ÷2 à
+  chaque frontière avec RESTORE du best du palier — StagedBestRestoreCallback)
+  avec pour SEULE différence l'ajout de --fewshot 10 (les 10 exemples résolus
+  injectés dans le prompt, rollouts + éval périodique). Paire d'ablation :
+  exp22.5 zero-shot (partiel, 27 ep : best test 41, best train 0.369) vs
+  exp22.6 few-shot. La question : quelle part du niveau ~50 de la lignée
+  few-shot vient des exemples dans le prompt vs du RL lui-même ?
+
+algorithm: GRPO (TRL 1.9 + vLLM colocate), LoRA r=64/α=128, FEW-SHOT k=10, paliers 10 ep ÷2 avec restore du best de palier
+model: /tmp/models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu
+script: src/train/train_grpo.py --lora-r 64 --lr-stage-every-epochs 10 --lr-stage-factor 2 --lr-stage-restore-best --fewshot 10 ...
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2
+wandb: ~
+
+training:
+  fine_tuning: LoRA r=64 alpha=128
+  num_generations: 8
+  gradient_accumulation_steps: 64
+  max_completion_length: 512
+  num_epochs: 50                    # 5 paliers de 10 epochs (~2300 steps)
+  learning_rate: 1.25e-6
+  beta_kl: 0.01
+  lr_stage_every_epochs: 10
+  lr_stage_factor: 2
+  lr_stage_restore_best: true
+  attn_implementation: flash_attention_2
+  fewshot: 10                       # LA variable de l'ablation (exp22.5 : 0)
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  setsid nohup python src/train/train_grpo.py
+    --lora-r 64
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --num-epochs 50 --learning-rate 1.25e-6 --beta 0.01
+    --lr-stage-every-epochs 10 --lr-stage-factor 2 --lr-stage-restore-best
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp22.6_stage10ep_fewshot
+    > logs/exp22.6_stage10ep_fewshot.log 2>&1 &
+
+ablation:
+  paire: "exp22.5 (zero-shot) vs exp22.6 (few-shot k=10) — tout le reste identique"
+  exp22_5_zeroshot: "test : 18 → pic 41 @ steps 400-500, oscille 20-36 ; train best 0.3692 (partiel, mort epoch 27 sur purge pod)"
+  attendu_fewshot: "si la lignée 22.3/22.4 est une bonne référence : pic ~49-50 vers l'epoch 5-11, train ~0.44-0.48"
+  lecture: "la DIFF des deux courbes (test et train) isole la contribution des exemples du prompt, à recette RL strictement égale"
+
+results:
+  statut: "MORT step 516/2300 (epoch 11.2) — recréation du pod (purge /tmp) entre le 03 et le 05/08"
+  test_pass1: "18 → 40 (ep1) → 48 (ep4.3) → pic 49 @ step 250 (ep5.4) → oscille 41-46 ensuite"
+  train_rolling_best: "0.4681 @ step 322 (epoch 7) — retrouve le mur ~0.47 de la lignée few-shot"
+  palier_1: "frontière epoch 10 (step 460) OK : restore du best du palier (poids+Adam), LR 6.25e-7 beta 5e-3"
+  bests_sur_home: "exp22.6_stage10ep_fewshot_best (49 test), _besttrain, _stagebest (adapter+optimizer)"
+
+verdict: >
+  Malgré la mort prématurée, l'ablation few-shot vs zero-shot a sa réponse partielle :
+  à recette RL strictement identique, few-shot k=10 = best test 49 / train 0.468 (11 ep)
+  contre zero-shot = best test 41 / train 0.369 (27 ep). Les exemples du prompt valent
+  ~+8 pts test et ~+0.10 de reward train — et la lignée few-shot retombe sur son mur
+  train ~0.47 quel que soit le schedule. Suite : exp23_verl_repro (full-FT, recette
+  papier traduite TRL) pour tester si le mur vient de l'adapter LoRA lui-même.

@@ -10,13 +10,15 @@
 # Usage :
 #   bash setup/setup_agentgym_rl_v2.sh            # construit /tmp/envs/agentgym-rl-v2
 #
-# L'ANCIEN env (~/envs/agentgym-rl : vLLM 0.9.1 / TRL 1.4.0) n'est PAS touché — c'est
-# le rollback tant que la v2 n'a pas fait ses preuves sur plusieurs runs longs.
+# (L'ancien env rollback ~/envs/agentgym-rl a été supprimé le 2026-07-29 — ménage
+#  disque après validation de la v2 sur les runs longs exp20/22/22.1.)
 set -euo pipefail
 
 ENV_DIR="${1:-/tmp/envs/agentgym-rl-v2}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BASE_PYTHON="$HOME/envs/agentgym-rl/bin/python"   # même interpréteur 3.11 que l'env historique
+# Python 3.11 requis (wheel flash-attn cp311). pyenv d'abord, sinon l'env textcraft.
+BASE_PYTHON="/opt/pyenv/versions/3.11.7/bin/python"
+[ -x "$BASE_PYTHON" ] || BASE_PYTHON="$HOME/envs/agentenv-textcraft/bin/python"
 CACHE="/tmp/pip-cache"
 
 echo "[setup-v2] Création du venv : $ENV_DIR"

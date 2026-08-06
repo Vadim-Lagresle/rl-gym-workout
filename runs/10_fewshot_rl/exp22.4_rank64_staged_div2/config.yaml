@@ -1,0 +1,84 @@
+name: exp22.4_rank64_staged_div2
+date: 2026-07-31
+description: >
+  Retour aux paliers CALENDAIRES (comme exp20) mais en décroissance plus douce
+  et plus fréquente : LR et beta ÷2 toutes les 4 epochs (exp20 : ÷3 / 3 ep).
+  Départ 1.25e-6 (le départ stable validé par exp22.3), LoRA r=64. Lecture
+  d'exp22.3 (demande Vadim) : la montée epochs 1-11 est saine (test 36→49,
+  zéro spike KL) mais le test décroche ensuite alors que le train se
+  maintient — le LR restait trop haut trop longtemps entre les coupes
+  adaptatives (1re coupe seulement à l'epoch 9.5). Ici on n'attend pas la
+  stagnation : on coupe ÷2 à CHAQUE 4 epochs, quoi qu'il arrive — la coupe
+  arrive pendant la dynamique de montée (epoch 4) au lieu d'après le
+  décrochage. En 24 epochs : 6 paliers, LR final 3.9e-8.
+
+algorithm: GRPO (TRL 1.9 + vLLM colocate), LoRA r=64/α=128, few-shot k=10, paliers calendaires LR+beta ÷2 / 4 epochs
+model: /tmp/models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu
+script: src/train/train_grpo.py --lora-r 64 --learning-rate 1.25e-6 --lr-stage-every-epochs 4 --lr-stage-factor 2 ...
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2
+wandb: ~
+
+training:
+  fine_tuning: LoRA r=64 alpha=128
+  num_generations: 8
+  gradient_accumulation_steps: 64
+  max_completion_length: 512
+  num_epochs: 24                    # 6 paliers de 4 epochs (~1128 steps, ~20-24 h)
+  learning_rate: 1.25e-6            # départ validé par exp22.3 (zéro spike KL)
+  beta_kl: 0.01
+  lr_stage_every_epochs: 4
+  lr_stage_factor: 2                # beta divisé aussi (pas de --lr-stage-keep-beta)
+  attn_implementation: flash_attention_2
+  fewshot: 10
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs
+
+paliers_prevus:
+  - "epochs 0-4   : LR 1.25e-6,  beta 1e-2"
+  - "epochs 4-8   : LR 6.25e-7,  beta 5e-3"
+  - "epochs 8-12  : LR 3.13e-7,  beta 2.5e-3"
+  - "epochs 12-16 : LR 1.56e-7,  beta 1.25e-3"
+  - "epochs 16-20 : LR 7.81e-8,  beta 6.25e-4"
+  - "epochs 20-24 : LR 3.91e-8,  beta 3.13e-4"
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  setsid nohup python src/train/train_grpo.py
+    --lora-r 64
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --num-epochs 24 --learning-rate 1.25e-6 --beta 0.01
+    --lr-stage-every-epochs 4 --lr-stage-factor 2
+    --fewshot 10 --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp22.4_rank64_staged_div2
+    > logs/exp22.4_rank64_staged_div2.log 2>&1 &
+
+references_pour_lecture:
+  exp22_3_adaptatif: "49/100 @ epochs 7.6-10.9 puis décrochage — coupes trop tardives"
+  exp20_r16_calendaire_div3_3ep: "58/100 @ step 800 — référence absolue (r=16, départ 5e-6)"
+  objectif_1: "tenir le pic test au-delà de l'epoch 11 (là où exp22.3 décroche) — c'est LE test du calendaire précoce"
+  objectif_2: "battre 49 (pic exp22.3), viser 53-58"
+  note: "pas de besttrain en mode calendaire (RewardAdaptiveLrCallback inactif) — seul le best test est sauvé"
+
+results:
+  stopped: "2026-07-31 ~17:15 — arrêt manuel à step ~407 (epoch ~8.8, ~5 h)"
+  best_test: "50/100 @ step 250 (epoch ~5.4) — adapter → saves/keep_best/"
+  test_trajectory: "43 → 46 → 50 (montée jusqu'à l'epoch ~5.4) → 49, 43, 42 : même profil de décrochage post-pic qu'exp22.3"
+  paliers: "palier 0 (LR 1.25e-6) epochs 0-4, palier 1 (6.25e-7) dès l'epoch 4 — la coupe ÷2 précoce n'a PAS empêché le décrochage"
+
+verdict: >
+  Même symptôme qu'exp22.3 malgré la coupe calendaire précoce : pic ~50 vers
+  l'epoch 5 puis érosion. Couper le LR pendant la montée ne suffit pas, car la
+  coupe consolide l'état COURANT — qui après le pic est déjà une dérive.
+  Diagnostic convergent sur la lignée : ce n'est pas QUAND on coupe qui manque,
+  c'est D'OÙ on repart. → exp22.5 : paliers calendaires LONGS (10 epochs
+  minimum par LR, vraies mesures stables) + restore du BEST du palier (poids +
+  optimizer) à chaque frontière (idée Vadim, 2026-07-31).

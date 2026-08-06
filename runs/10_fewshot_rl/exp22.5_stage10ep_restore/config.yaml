@@ -1,0 +1,104 @@
+name: exp22.5_stage10ep_restore
+date: 2026-07-31
+mode: ZERO-SHOT (décision Vadim 31/07 17h44 — le 1er lancement few-shot k=10 a été
+  arrêté à ~40 min et TOUTES ses traces purgées, wandb 096kat76 inclus, pour une
+  comparaison propre : même recette d'entraînement, prompt SANS exemples résolus.
+  Référence zero-shot sans training = 18/100 ; toute la lignée exp19-22.4 était
+  en few-shot k=10. La question posée — quelle part du niveau ~50 vient des
+  exemples dans le prompt vs du RL lui-même ?)
+description: >
+  Synthèse de la lignée exp22 (idée Vadim, 2026-07-31) : paliers calendaires
+  LONGS + restore du best à chaque coupe. Constat des runs précédents :
+  l'adaptatif (22.3) coupe APRÈS le décrochage (il faut `patience` checks de
+  stagnation) ; le calendaire court (22.4, ÷2/4ep) coupe pendant la montée
+  mais consolide l'état COURANT, qui après le pic est déjà une dérive — les
+  deux plafonnent à 49-50 puis s'érodent. Ici : (1) chaque palier de LR dure
+  10 epochs — assez long pour de vraies mesures stables ; (2) pendant le
+  palier, save du BEST du palier (adapter + moments Adam, moyenne roulante
+  du reward train) + best GLOBAL du run ; (3) à la frontière : RESTORE du
+  best du palier écoulé PUIS LR et beta ÷2 — chaque palier repart du meilleur
+  état vu, pas de là où la trajectoire a fini. Nouveau
+  StagedBestRestoreCallback (schedules.py) + flag --lr-stage-restore-best.
+
+algorithm: GRPO (TRL 1.9 + vLLM colocate), LoRA r=64/α=128, few-shot k=10, paliers 10 ep ÷2 avec restore du best de palier
+model: /tmp/models/Qwen2.5-3B-Instruct   # depuis zéro — ancre KL = Qwen nu
+script: src/train/train_grpo.py --lora-r 64 --lr-stage-every-epochs 10 --lr-stage-factor 2 --lr-stage-restore-best ...
+hardware: 1× B200 192 GB HBM3e — env v2 /tmp/envs/agentgym-rl-v2
+wandb: ~
+
+training:
+  fine_tuning: LoRA r=64 alpha=128
+  num_generations: 8
+  gradient_accumulation_steps: 64
+  max_completion_length: 512
+  num_epochs: 50                    # 5 paliers de 10 epochs (~2300 steps, ~40-55 h — week-end)
+  learning_rate: 1.25e-6            # départ stable validé (exp22.3 : zéro spike KL)
+  beta_kl: 0.01
+  lr_stage_every_epochs: 10
+  lr_stage_factor: 2                # beta divisé aussi
+  lr_stage_restore_best: true       # restore poids + optimizer du best du palier à chaque frontière
+  attn_implementation: flash_attention_2
+  fewshot: 0                        # ZERO-SHOT — seule différence avec la lignée exp19-22.4
+  vllm_max_len: 20480
+  eval_every: 50
+  eval_items: 100
+  save_steps: 47
+  save_total_limit: 20
+  output_root: /tmp/trl_grpo_runs
+
+paliers_prevus:
+  - "epochs 0-10  : LR 1.25e-6,  beta 1e-2    → restore best palier à l'epoch 10"
+  - "epochs 10-20 : LR 6.25e-7,  beta 5e-3    → restore à l'epoch 20"
+  - "epochs 20-30 : LR 3.13e-7,  beta 2.5e-3  → restore à l'epoch 30"
+  - "epochs 30-40 : LR 1.56e-7,  beta 1.25e-3 → restore à l'epoch 40"
+  - "epochs 40-50 : LR 7.81e-8,  beta 6.25e-4"
+
+artefacts_disque:
+  stage_best: "saves/trl_grpo/exp22.5_stage10ep_restore_stagebest — best du palier courant (adapter + optimizer.pt + .besttrain_info), écrasé à chaque nouveau best"
+  global_best: "saves/trl_grpo/exp22.5_stage10ep_restore_besttrain — best global du run (promotion par copie du stage best)"
+  best_test: "saves/trl_grpo/exp22.5_stage10ep_restore_best — best Pass@1 test (TestEvalCallback, inchangé)"
+
+command: >
+  export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH" &&
+  PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+  setsid nohup python src/train/train_grpo.py
+    --lora-r 64
+    --num-generations 8 --gradient-accumulation-steps 64
+    --max-completion-length 512 --max-items 0
+    --num-epochs 50 --learning-rate 1.25e-6 --beta 0.01
+    --lr-stage-every-epochs 10 --lr-stage-factor 2 --lr-stage-restore-best
+    --vllm-max-len 20480
+    --eval-every 50 --eval-items 100
+    --save-steps 47 --save-total-limit 20
+    --output-root /tmp/trl_grpo_runs
+    --use-vllm-inprocess --run-name exp22.5_stage10ep_restore
+    > logs/exp22.5_stage10ep_restore.log 2>&1 &
+
+validation:
+  - "selftest CPU (test 4 schedules.py) : restore à la frontière, LR/beta ÷2 après restore, saves sur les bests de palier, promotions globales correctes, la dérive de fin de palier n'écrase pas le stage best"
+  - "garde-fous CLI : --lr-stage-restore-best sans --lr-stage-every-epochs → SystemExit ; full-FT → SystemExit"
+
+references_pour_lecture:
+  exp22_3_adaptatif: "49/100, décroche après epoch ~11 (coupes trop tardives)"
+  exp22_4_calendaire_court: "50/100 @ epoch 5.4, décroche pareil (coupe précoce mais consolide la dérive)"
+  exp20_r16: "58/100 — référence absolue"
+  objectif_1: "epochs 0-10 : retrouver le pic ~49-50 (attendu vers l'epoch 5) — la fin de palier peut dériver, ON S'EN FICHE, le restore repartira du best"
+  objectif_2: "epochs 10-20 (LR 6.25e-7 depuis le best) : dépasser 50 — c'est LE test de l'idée"
+  objectif_3: "battre 58 (exp20) sur l'ensemble du run"
+
+results:
+  died: "nuit ven→sam (log figé le 01/08 02:05 UTC) — tué en plein rollout SANS traceback à step 1260/2300 (epoch ~27.4) : recréation du pod week-end (/tmp purgé, même signature que le 30/07). Bests sur home intacts."
+  best_test: "41/100 @ steps 400 et 500 (epoch ~9-11, palier 0-1) — adapter → saves/keep_best/"
+  test_trajectory: "18 (= baseline, step 50) → 22 → 32 @ 250 → pic 41 @ 400-500 → oscille 20-36 ensuite"
+  train_reward: "best global rolling mean 0.3692 @ step 368 (epoch 8, palier 0) — jamais rebattu ensuite (vs ~0.478 en few-shot)"
+  paliers: "transitions epochs 10 et 20 OK, restore du best de palier aux deux frontières, 13 promotions du best global — la MÉCANIQUE StagedBestRestore a fonctionné de bout en bout"
+
+verdict: >
+  Partiel (27 epochs / 50) mais riche. (1) La mécanique paliers 10 ep +
+  restore fonctionne en réel (2 frontières traversées proprement). (2)
+  Zero-shot : départ à la baseline 18, montée RL réelle jusqu'à 41 — le RL
+  apprend bien quelque chose sans exemples. (3) Comparaison à few-shot
+  (lignée 22.3/22.4 : 49-50, train ~0.478 vs 0.369 ici) : les exemples dans
+  le prompt valent grosso modo +9-10 points de test et rehaussent le plafond
+  train. Ablation PROPRE en cours : exp22.6 = exactement cette recette
+  (stage10ep + restore) AVEC --fewshot 10 — seul le prompt change.

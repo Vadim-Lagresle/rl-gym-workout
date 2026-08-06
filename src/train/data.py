@@ -19,7 +19,9 @@ from agentenv.envs import TextCraftEnvClient
 
 # Paths
 REPO_ROOT = Path(os.environ.get("REPO_ROOT", Path(__file__).resolve().parents[2]))
-DEFAULT_MODEL_PATH = REPO_ROOT / "models" / "Qwen2.5-3B-Instruct"
+# Le modèle vit sur /tmp depuis 2026-07-29 (home 35 Go trop petit ; /tmp volatil
+# mais retéléchargeable en ~2 min via setup/ensure_qwen_tmp.sh).
+DEFAULT_MODEL_PATH = Path("/tmp/models/Qwen2.5-3B-Instruct")
 TRAIN_PATH = REPO_ROOT / "data" / "train" / "textcraft_train.json"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 
