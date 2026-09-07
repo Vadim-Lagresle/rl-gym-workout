@@ -1,0 +1,80 @@
+# exp23.3_warmstart64_50ep — continuation du best d'exp23.2 (64/100), ancre KL = Qwen nu
+#
+# Même protocole qu'exp23.2 (fiche mère pour le mécanisme --warm-start-dir et ses
+# validations : ../exp23.2_warmstart58_50ep/config.yaml), un cran plus loin :
+#   - warm-start : poids ET moments Adam du best 64 (optimizer.pt présent cette fois,
+#     chargé par WarmStartOptimizerCallback — la fausse note d'exp23.2 ne se répète pas :
+#     le ménage disque n'intervient qu'APRÈS la ligne "[warm-start] moments Adam chargés"
+#     dans le log du run réel).
+#   - ancre KL : Qwen nu (--model-path base ; ref rechargée du chemin par TRL, figée).
+#   - un best n'est écrit que s'il DÉPASSE 64 (--best-init-score 0.64).
+#
+# Question : la rampe lente continue-t-elle au-delà de 64 (objectif papier : 75) ?
+
+run_name: exp23.3_warmstart64_50ep
+date: 2026-08-09
+model: Qwen2.5-3B-Instruct (/tmp/models) + warm-start saves/trl_grpo/exp23.2_warmstart58_50ep_best
+stack: TRL 1.9.2 + vLLM colocate + flash-attention (env v2, reconstruit après purge du 09/08)
+
+method: GRPO full-FT zero-shot, vrai PPO (buffer 256, 4 updates clippées/cycle),
+         warm-start poids+optimiseur du best exp23.2 (64), ancre KL = Qwen base
+
+hyperparams:   # = exp23.1/23.2
+  full_ft: true
+  learning_rate: 1.0e-6
+  beta_kl: 0.001
+  entropy_coef: 0.001
+  epsilon_clip: 0.2
+  num_generations: 8
+  steps_per_generation: 256
+  gradient_accumulation_steps: 64
+  num_iterations: 1
+  max_rounds_train: 30
+  max_completion_length: 512
+  vllm_max_len: 32768
+  fewshot: 0
+  num_epochs: 50               # ~2200 steps, ETA ~20 h
+  lr_scheduler: constant
+  optim: adamw_bnb_8bit
+  temperature: 1.0
+  warm_start_dir: saves/trl_grpo/exp23.2_warmstart58_50ep_best
+  best_init_score: 0.64
+
+persistence:
+  best_test: saves/trl_grpo/exp23.3_warmstart64_50ep_best (14.3 Go, seulement si Pass@1 > 64)
+  checkpoints: /tmp/trl_grpo_runs (volatils)
+  note_disque: "ménage validé 09/08 : best 58 (exp23.1, 6.2 Go) supprimé (dépassé par
+    le 64) + wandb local ; optimizer.pt du 64 (8.1 Go) supprimé APRÈS vérification du
+    chargement par ce run"
+
+eval_every_steps: 47
+eval_items: 100
+
+reference_exp23_2:
+  best_parent: 64/100 @ step 1128 (epoch ~25.6)
+  dernières_évals: "54-64, pas de saturation à la mort du run"
+
+launch:
+  date: 2026-08-09 15:26
+  wandb: zzeb85zh
+  fin: 2026-08-10 ~07:13 — 2200/2200 steps, fin PROPRE (premier run exp23.x à terme)
+
+results:
+  best: "AUCUN best écrit — max 63/100, jamais ≥ 64 (seuil --best-init-score 0.64)"
+  demarrage: "évals 47-376 : 49-56 — creux de ~10 pts sous le pic 64 MALGRÉ les moments
+    Adam chargés (434 états, vérifié au lancement)"
+  fin_de_run: "12 dernières évals : 55-63 (max 63 au step 2162)"
+  artefact: "modèle final step 2200 sur /tmp/trl_grpo_runs/exp23.3_warmstart64_50ep
+    (6.2 Go, non purgé) → point de départ d'exp23.4"
+
+verdict: |
+  Deux leçons majeures :
+  1. Le creux post-restart N'EST PAS un problème d'optimiseur : Adam était chargé et le
+     run a quand même démarré ~10 pts sous le 64. Explication : le "best" est un max sur
+     des évals bruitées (±4 pts) — le 64 était un pic chanceux d'une politique de vrai
+     niveau ~57-59 (évals voisines dans exp23.2 : 54-59). Au restart on mesure le vrai
+     niveau. Celui-ci progresse lentement : ~58 (fin 23.2) → ~59-61 (fin 23.3).
+  2. Seuil de best trop haut = piège opérationnel : 50 epochs, 20 h de GPU, et RIEN de
+     persisté sur le home (si /tmp avait été purgé, tout était perdu). exp23.4 abaisse
+     le seuil à 0.55 : le best+optimizer sur le home redevient un point de reprise
+     permanent, indépendamment du record.

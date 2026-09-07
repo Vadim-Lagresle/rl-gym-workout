@@ -1,0 +1,100 @@
+# exp23.1_verl_100ep — exp23 (recette verl sur TRL) prolongée à 100 epochs
+#
+# Motivation : exp23 s'est arrêtée à 30 epochs (protocole verl) alors que la courbe
+# test MONTAIT ENCORE — 40/100 atteint aux steps 1034/1128/1175 (epochs 23-27), sans
+# plateau franc. On relance la même recette from scratch avec le triple de budget
+# pour voir où elle sature réellement.
+#
+# DEUX seuls changements vs exp23 (fiche mère : ../exp23_verl_repro/config.yaml) :
+#   1. --num-epochs 100 (au lieu de 30) → ~4400 steps, ETA ~45 h
+#   2. --save-best-optimizer (NOUVEAU flag) : optimizer.pt (~6.2 Go, Adam 8-bit)
+#      sauvé avec chaque best test sur le disque home persistant → reprise à
+#      moments Adam cohérents après purge /tmp (leçon exp22.1 ; /tmp a été purgé
+#      2 fois en 2 semaines). Écrit APRÈS le swap atomique du modèle, en
+#      .tmp + os.replace ; l'ancien optimizer.pt est supprimé avant l'écriture du
+#      nouveau modèle pour plafonner le pic disque à ~17.8 Go.
+#
+# Préparation disque (validée explicitement le 2026-08-06) : suppression des 4
+# optimizer.pt de runs LoRA clos (3.7 Go) + de exp23_verl_repro_best (5.8 Go,
+# 40/100 — re-dérivable par ce run) → 20 Go libres pour un best+optim de 12 Go.
+
+run_name: exp23.1_verl_100ep
+date: 2026-08-06
+model: Qwen2.5-3B-Instruct (/tmp/models)
+stack: TRL 1.9.2 + vLLM colocate + flash-attention (env v2, reconstruit après purge)
+
+method: GRPO full-FT zero-shot, vrai PPO (buffer 256, 4 updates clippées/cycle)
+         — identique exp23, voir sa fiche pour le détail des 6 ingrédients verl
+
+hyperparams:   # tous identiques à exp23 sauf num_epochs
+  full_ft: true
+  learning_rate: 1.0e-6
+  beta_kl: 0.001
+  entropy_coef: 0.001
+  epsilon_clip: 0.2
+  num_generations: 8
+  steps_per_generation: 256
+  gradient_accumulation_steps: 64
+  num_iterations: 1
+  max_rounds_train: 30
+  max_completion_length: 512
+  vllm_max_len: 32768
+  fewshot: 0
+  num_epochs: 100            # <<< seul hyperparamètre modifié
+  lr_scheduler: constant
+  optim: adamw_bnb_8bit
+  temperature: 1.0
+
+persistence:
+  best_test: saves/trl_grpo/exp23.1_verl_100ep_best (modèle HF 5.8 Go + optimizer.pt 6.2 Go)
+  checkpoints: /tmp/trl_grpo_runs (volatils, save_steps 94, limit 1)
+
+eval_every_steps: 47
+eval_items: 100
+
+reference_exp23:   # ce que ce run doit dépasser
+  best: 40/100 @ step 1175 (epoch ~27)
+  courbe: 15 → 28 (ep5) → 33 (ep10) → 40 (ep22-27), encore ascendante à l'arrêt
+
+validation:
+  - code --save-best-optimizer testé à sec le 2026-08-06 (4 cas : écriture,
+    remplacement, échec sans casse du best ni du run, flag off = comportement
+    historique) — la mécanique GPU est celle d'exp23, déjà validée par smoke + run complet
+
+launch:
+  date: 2026-08-06 ~12h30 (setsid, session propre)
+  pid: 524546
+  log: logs/exp23.1_verl_100ep.log
+  wandb: https://wandb.ai/v-lagresle-criteo/rl-gym-workout/runs/pcwhl5br
+
+results:
+  best: "58/100 @ step 3854 (epoch 87.6) — avec optimizer.pt (8.1 Go, adamw_bnb_8bit)"
+  mort: "step ~4236/4400 (epoch ~96.1), 2026-08-08 01h02 — purge /tmp pendant le week-end
+    (même signature que exp22.1/22.3/22.5 : /tmp/envs, /tmp/models et le checkpoint
+    périodique disparus, aucune trace d'erreur applicative, serveur TextCraft tué avec).
+    Le best sur le home (saves/trl_grpo/exp23.1_verl_100ep_best) est INTACT."
+  courbe_test: |
+    Montée quasi monotone sur toute la durée, sans collapse KL — contraste net avec
+    les runs LoRA (exp22.x) qui montraient un pic net suivi d'érosion :
+      ep1-10  (steps   47- 517) : 16 → 29   (démarrage, apprentissage du format)
+      ep15-22 (steps  658-1034) : 38 → 41 → 28 (bruit, pas de tendance nette)
+      ep22-35 (steps 1081-1598) : 28 → 47   (rampe continue)
+      ep35-60 (steps 1645-2820) : 42 → 51   (rampe plus lente, palier ~45-50)
+      ep60-80 (steps 2867-3760) : 45 → 54   (deuxième rampe)
+      ep80-96 (steps 3807-4230) : 52 → 58 → plateau 48-56 (BEST à ep87.6)
+    Dernières 15 évals (ep 80-96) : 52,58,53,48,51,55,55,54,56,55 — plateau bruité
+    50-58, pas de tendance à la hausse ni à la baisse nette sur les ~10 derniers %.
+
+verdict: |
+  Contrairement à exp23 (30 epochs, arrêtée en pleine ascension à 40/100), le budget
+  x3.3 change le verdict : **58/100, nouveau best du projet** (devant 54 exp10.8 LoRA,
+  58 exp20 LoRA à re-confirmer). La recette verl-sur-TRL (full-FT, LR/beta constants,
+  vrai PPO 4 updates clippées, entropie, max_rounds 30, zero-shot) apprend PROPREMENT
+  sur la durée — aucun signe de collapse KL même à epoch 96, contrairement à nos
+  runs LoRA qui montrent systématiquement un pic puis une érosion. Ça pointe vers
+  l'hypothèse "capacité full-FT + PPO multi-update = meilleure stabilité longue durée"
+  plutôt que "LR mal calibré" comme cause du mur ~50 observé en LoRA.
+  Reste à trancher : le score de 58 est-il un pic de bruit (comme le 58 d'exp20,
+  jamais re-confirmé) ou un plateau stable ? Le run est mort à 96% du budget prévu,
+  quasi complet ; le plateau des 15 dernières évals (48-58) suggère que les ~4 epochs
+  manquantes n'auraient probablement rien changé de qualitatif.

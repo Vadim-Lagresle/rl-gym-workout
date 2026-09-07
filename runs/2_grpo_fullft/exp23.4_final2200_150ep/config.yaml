@@ -1,0 +1,84 @@
+# exp23.4_final2200_150ep — continuation du modèle FINAL d'exp23.3, 150 epochs
+#
+# Pourquoi le FINAL (step 2200) et pas un "best" : exp23.3 n'a jamais dépassé 64 → aucun
+# best écrit, et l'optimizer du pic 64 avait été supprimé après chargement (plan validé
+# 09/08). Le final 2200 est l'état le plus récent de la trajectoire (vrai niveau ~59-61),
+# encore présent sur /tmp (pas de purge cette fois). Adam repart de zéro — exp23.3 a
+# montré que ce n'est pas ce qui coûte (creux post-restart = bruit de sélection du best,
+# pas l'optimiseur).
+#
+# Changements vs exp23.3 (tout le reste identique, fiche mère : ../exp23.2_.../config.yaml) :
+#   - warm-start : /tmp/trl_grpo_runs/exp23.3_warmstart64_50ep (modèle final, poids seuls)
+#   - num_epochs : 150 (~6600 steps, ~60 h) — arrêt MANUEL par Vadim si stagnation
+#   - best_init_score : 0.55 (leçon exp23.3 : seuil trop haut = rien de persisté en 50 ep ;
+#     ici le best+optimizer sur le home redevient un point de reprise purge-proof)
+#
+# Ménage disque associé (validé 10/08) : les poids du pic 64 (exp23.2_best, 6.2 Go) sont
+# supprimés dès que le PREMIER best d'exp23.4 est écrit (le nouveau best+optimizer le
+# remplace comme point de reprise ; l'artefact "record 64" disparaît).
+
+run_name: exp23.4_final2200_150ep
+date: 2026-08-10
+model: Qwen2.5-3B-Instruct (/tmp/models) + warm-start /tmp/trl_grpo_runs/exp23.3_warmstart64_50ep (final step 2200)
+stack: TRL 1.9.2 + vLLM colocate + flash-attention (env v2)
+
+method: GRPO full-FT zero-shot, vrai PPO (buffer 256, 4 updates clippées/cycle),
+         warm-start poids du final exp23.3, Adam neuf, ancre KL = Qwen base
+
+hyperparams:   # = exp23.1/23.2/23.3
+  full_ft: true
+  learning_rate: 1.0e-6
+  beta_kl: 0.001
+  entropy_coef: 0.001
+  epsilon_clip: 0.2
+  num_generations: 8
+  steps_per_generation: 256
+  gradient_accumulation_steps: 64
+  num_iterations: 1
+  max_rounds_train: 30
+  max_completion_length: 512
+  vllm_max_len: 32768
+  fewshot: 0
+  num_epochs: 150              # ~6600 steps, ETA ~60 h — arrêt manuel si stagnation
+  lr_scheduler: constant
+  optim: adamw_bnb_8bit
+  temperature: 1.0
+  warm_start_dir: /tmp/trl_grpo_runs/exp23.3_warmstart64_50ep
+  best_init_score: 0.55
+
+persistence:
+  best_test: saves/trl_grpo/exp23.4_final2200_150ep_best (~14.3 Go, dès Pass@1 >= 55)
+  checkpoints: /tmp/trl_grpo_runs (volatils)
+  note_disque: "15 Go libres au lancement ; premier best = 14.3 Go (marge 0.7 Go, une
+    seule fois) puis suppression des poids du 64 (exp23.2_best) → ~6.9 Go de marge"
+
+eval_every_steps: 47
+eval_items: 100
+
+reference_exp23_3:
+  max_evals: 63/100 (jamais >= 64, aucun best écrit)
+  dernières_évals: "55-63 — vrai niveau ~59-61"
+
+launch:
+  date: 2026-08-10 07:44
+  wandb: 5wlvw57j
+  pid: 476849
+  sanity: "[warm-start] politique initialisée depuis .../model.safetensors, ancre KL =
+    /tmp/models/Qwen2.5-3B-Instruct ; pas d'optimizer.pt (attendu) ; KL step 1-4 ~0.06"
+
+results:
+  best: "69/100 @ step 3055 (epoch ~69.4) — NOUVEAU BEST DU PROJET, sauvé complet
+    (model.safetensors 6.2 Go + optimizer.pt 8.1 Go) le 11/08 05:59"
+  mort: "step ~3170/6600 (epoch ~72), purge pod nuit du 10-11/08 (device home rbd1→rbd3,
+    /tmp vidé)"
+  fin_de_run: "15 dernières évals 56-69 : toujours ascendant sous fort bruit (le 69 suivi
+    de 62/59 — ±5 pts inter-évals)"
+  premier_best: "61 @ step 47 (seuil 0.55 efficace : point de reprise dès la 1re éval)"
+
+verdict: |
+  Le seuil abaissé (0.55) a fait exactement son travail : best+optimizer persistés en
+  continu, la purge n'a rien coûté d'irrécupérable. La rampe lente continue : vrai
+  niveau ~59-61 (fin 23.3) → ~62-65 avec des pics à 68-69 (ep ~65-70). 69 = nouveau
+  record, à 6 pts de l'objectif papier (75). Prochaine étape décidée avec Vadim :
+  bascule sur une recherche d'hyperparamètres LoRA (grille exp24, blog Thinking
+  Machines "LoRA Without Regret") plutôt que de continuer à pousser cette lignée.

@@ -45,7 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # racine du repo �
 
 from datasets import Dataset
 from peft import LoraConfig
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
 from src.train import schedules, vllm_engine
@@ -54,6 +54,29 @@ from src.train.data import DEFAULT_MODEL_PATH, DEFAULT_SYSTEM_PROMPT, REPO_ROOT,
 from src.train.diagnostics import MemDiagCallback
 from src.train.periodic_eval import TestEvalCallback
 from src.train.rollout import grpo_rollout_func, textcraft_reward
+
+
+class WarmStartOptimizerCallback(TrainerCallback):
+    """Charge l'état d'optimiseur d'un warm-start AU DÉBUT du train.
+
+    L'optimiseur n'existe pas encore à la construction du trainer : HF Trainer le
+    crée dans train(), juste avant de déclencher on_train_begin — d'où ce callback.
+    bnb 8-bit : load_state_dict est surchargé par bitsandbytes et préserve les dtypes
+    des états quantifiés (uint8 + stats fp32), même mécanique que la reprise de
+    checkpoint HF standard.
+    """
+
+    def __init__(self, optimizer_path: str) -> None:
+        self.optimizer_path = optimizer_path
+        self.trainer_ref = None  # injecté après la création du GRPOTrainer
+
+    def on_train_begin(self, targs, state, control, **kwargs):
+        import torch
+        sd = torch.load(self.optimizer_path, map_location="cpu", weights_only=False)
+        self.trainer_ref.optimizer.load_state_dict(sd)
+        n_states = len(sd.get("state", {}))
+        print(f"[warm-start] moments Adam chargés ({n_states} états de paramètres) "
+              f"depuis {self.optimizer_path}", flush=True)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -91,6 +114,17 @@ def build_parser() -> argparse.ArgumentParser:
                              "capacité d'adaptation, adapter ~4x plus gros (~500 Mo).")
     parser.add_argument("--lora-alpha", type=int, default=0,
                         help="Alpha LoRA (0 = auto : 2×r, le ratio de la lignée exp10).")
+    parser.add_argument("--moving-anchor-every-epochs", type=float, default=0,
+                        help="LoRA uniquement (exp25) : ancre KL MOBILE par merge-and-restart. "
+                             "Toutes les N epochs : snapshot de l'adapter (chaîne reconstructible "
+                             "dans saves/trl_grpo/<run>_anchors), fusion dans la base, adapter "
+                             "réinitialisé (A=kaiming, B=0), moments Adam LoRA purgés. La KL "
+                             "mesure alors la distance au DERNIER ré-ancrage, plus à Qwen nu. "
+                             "0 = off (ancre fixe historique). Détail : schedules.MovingAnchorCallback.")
+    parser.add_argument("--moving-anchor-initial-cycle", type=int, default=0,
+                        help="Reprise (--resume-from-checkpoint) d'un run à ancre mobile : nombre "
+                             "de ré-ancrages DÉJÀ effectués par le run d'origine (cf. chain.jsonl). "
+                             "Prochain ré-ancrage à l'epoch (N+1)×every. 0 = run neuf.")
     parser.add_argument("--beta", type=float, default=0.001,
                         help=(
                             "Coefficient de la penalite KL (ancrage a la reference). "
@@ -135,6 +169,12 @@ def build_parser() -> argparse.ArgumentParser:
                         ))
     parser.add_argument("--model-path", type=str, default="",
                         help="Path to model dir (default: models/Qwen2.5-3B-Instruct).")
+    parser.add_argument("--warm-start-dir", type=str, default="",
+                        help="(full-FT) Injecte les poids (model.safetensors) de ce dossier dans la "
+                             "POLITIQUE après la création du trainer, et charge son optimizer.pt "
+                             "(s'il existe) au début du train. L'ancre KL (modèle de référence) et "
+                             "le tokenizer restent ceux de --model-path : à la différence de "
+                             "--model-path <best>, la KL continue de mesurer la distance à la BASE.")
     parser.add_argument("--system-prompt", type=str, default=DEFAULT_SYSTEM_PROMPT,
                         help="System prompt. Pass '' for models without system role (e.g. Gemma-3).")
     parser.add_argument("--run-name", type=str, default="trl_grpo_textcraft_smoke")
@@ -158,6 +198,76 @@ def build_parser() -> argparse.ArgumentParser:
             "l'epoch 0, 11 dès l'epoch 2, ... Exclusif avec --max-rounds-schedule."
         ),
     )
+    parser.add_argument(
+        "--max-completion-schedule-epochs",
+        type=str,
+        default="",
+        help=(
+            "Curriculum du budget de sortie PAR TOUR (exp35), piloté par epoch, "
+            "format '<max_tokens>:<epoch>', e.g. '256:0,512:15,1024:35'. Ne pilote "
+            "que max_tokens de la génération vLLM (rollout) ; --max-completion-length "
+            "reste la valeur passée à TRL (la fixer au MAX du schedule). Backend "
+            "vLLM in-process uniquement (le repli HF ignore le schedule)."
+        ),
+    )
+    parser.add_argument(
+        "--depth-schedule-epochs",
+        type=str,
+        default="",
+        help=(
+            "Curriculum DEPTH par paliers DANS un seul run (exp33), format "
+            "'<depth>:<epoch>', ex. '1:0,2:6,3:20,4:45' = items depth<=1 dès l'epoch 0, "
+            "<=2 dès l'epoch 6... Implémenté par échantillonnage pondéré (magellan.py "
+            "DepthScheduleProvider) : le dataset reste entier, les items hors palier ont "
+            "une probabilité nulle. Exclusif avec --max-depth/--depth-exact/--goal-sampler."
+        ),
+    )
+    parser.add_argument(
+        "--depth-schedule-auto",
+        action="store_true",
+        help=(
+            "Curriculum DEPTH AUTO-DÉCLENCHÉ (exp33.1) : palier suivant si le reward "
+            "train moyen sur la dernière epoch complète >= --depth-auto-threshold, "
+            "sinon après --depth-auto-max-epochs au palier courant "
+            "(magellan.py DepthAutoScheduleProvider). Même masque uniforme depth<=palier "
+            "que --depth-schedule-epochs ; exclusif avec lui et avec --goal-sampler."
+        ),
+    )
+    parser.add_argument("--depth-auto-threshold", type=float, default=0.8,
+                        help="Seuil de reward train moyen (1 epoch) déclenchant le palier suivant.")
+    parser.add_argument("--depth-auto-max-epochs", type=float, default=10.0,
+                        help="Durée max d'un palier en epochs avant passage forcé.")
+    parser.add_argument("--depth-auto-start-stage", type=int, default=1,
+                        help="Palier de départ (reprise après purge : mettre le dernier "
+                             "palier atteint avant l'interruption, lu dans les logs "
+                             "'[depth-auto] >>> PALIER depth<=X').")
+    parser.add_argument("--goal-sampler", type=str, default="uniform",
+                        choices=["uniform", "online", "ek_depth", "magellan"],
+                        help=(
+                            "Autocurriculum (exp34) : échantillonnage des items train ∝ progrès "
+                            "d'apprentissage (port MAGELLAN, src/train/magellan.py). 'uniform' = "
+                            "GRPO standard ; 'online'/'ek_depth' = ALP par item/par depth sans "
+                            "réseau ; 'magellan' = estimateur appris sur les embeddings du LLM "
+                            "(tête SR + adapters LoRA séparés + compétence retardée par snapshots)."
+                        ))
+    parser.add_argument("--magellan-N", type=int, default=100,
+                        help="Horizon du retard de compétence, en optimizer steps (leur N=100).")
+    parser.add_argument("--magellan-epsilon-start", type=float, default=1.0)
+    parser.add_argument("--magellan-epsilon-end", type=float, default=0.2)
+    parser.add_argument("--magellan-epsilon-decay", type=float, default=320,
+                        help="Décroissance exponentielle de l'ε-greedy, en steps (eux : 320).")
+    parser.add_argument("--magellan-buffer-size", type=int, default=5000,
+                        help="Buffer (but, succès) pour l'entraînement de la tête SR.")
+    parser.add_argument("--magellan-batch-size", type=int, default=256,
+                        help="Buts par sr_update (échantillon pondéré récence).")
+    parser.add_argument("--magellan-recompute-freq", type=int, default=32,
+                        help="Steps entre deux recomputes de l'ALP sur tous les buts.")
+    parser.add_argument("--magellan-sr-lr", type=float, default=1e-4,
+                        help="LR Adam de l'estimateur SR (leur rl_script_args.lr=1e-4 — passé "
+                             "tel quel à sr_update, updater.py:93).")
+    parser.add_argument("--magellan-sr-lora-r", type=int, default=16,
+                        help="Rang des adapters SR séparés (leur lora_r=16).")
+    parser.add_argument("--magellan-sr-lora-alpha", type=int, default=32)
     parser.add_argument("--lr-stage-every-epochs", type=float, default=0,
                         help="Paliers LR/beta : divise le LR (et beta, sauf --lr-stage-keep-beta) "
                              "par --lr-stage-factor toutes les N epochs. 0 = off. Automatise "
@@ -227,6 +337,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Seuil initial du save-best (Pass@1, 0..1). Mettre au score du "
                              "checkpoint de reprise (ex. 0.32) pour ne jamais sauver pire que lui. "
                              "Défaut -1 = le 1er eval sauve toujours.")
+    parser.add_argument("--best-delete-before-save", action="store_true", default=False,
+                        help="Supprime l'ancien best AVANT d'écrire le nouveau (pic disque = "
+                             "1 modèle au lieu de 2). Requis pour le full-FT 7B (exp26) : le "
+                             "home 35 Go ne peut pas héberger deux modèles de 15 Go pendant le "
+                             "swap. Fenêtre de quelques minutes sans best complet, assumée.")
+    parser.add_argument("--save-best-optimizer", action="store_true", default=False,
+                        help="Sauve aussi l'état de l'optimiseur (optimizer.pt) avec le best test. "
+                             "Full-FT 3B + adamw_bnb_8bit : ~6.2 Go en plus des 5.8 Go du modèle — "
+                             "vérifier l'espace disque avant (politique 2026-07-29 : best + optimizer "
+                             "sur le home). Permet une reprise avec moments Adam cohérents après purge /tmp.")
     parser.add_argument("--save-steps", type=int, default=0,
                         help="Période de sauvegarde des checkpoints (0 = défaut : 50 en full-ft, 5 sinon)")
     parser.add_argument("--save-total-limit", type=int, default=0,
@@ -316,6 +436,18 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         schedules.MAX_ROUNDS_SCHEDULE_EPOCHS = \
             schedules.parse_max_rounds_schedule_epochs(args.max_rounds_schedule_epochs)
         print(f"[scaling-inter] schedule (epoch-based) = {schedules.MAX_ROUNDS_SCHEDULE_EPOCHS}", flush=True)
+    if args.max_completion_schedule_epochs:
+        sched = schedules.parse_max_completion_schedule_epochs(args.max_completion_schedule_epochs)
+        if max(tok for _, tok in sched) > args.max_completion_length:
+            raise SystemExit(
+                f"--max-completion-schedule-epochs dépasse --max-completion-length "
+                f"({args.max_completion_length}) : fixer --max-completion-length au "
+                f"MAX du schedule (budgets TRL/vLLM dimensionnés dessus).")
+        if not args.use_vllm_inprocess:
+            raise SystemExit("--max-completion-schedule-epochs requiert --use-vllm-inprocess "
+                             "(le repli HF ignore le schedule).")
+        schedules.MAX_COMPLETION_SCHEDULE_EPOCHS = sched
+        print(f"[completion-schedule] schedule (epoch-based) = {sched}", flush=True)
 
     fewshot_block, fewshot_messages = (None, None)
     if args.fewshot > 0:
@@ -505,6 +637,25 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
     # (Plus de VllmSyncCallback : la sync par step est faite nativement par TRL,
     #  et TestEvalCallback force sa propre sync avant chaque éval.)
 
+    warm_opt_cb = None
+    if args.warm_start_dir:
+        if not args.full_ft:
+            raise SystemExit("--warm-start-dir ne supporte que --full-ft (en LoRA, utiliser la "
+                             "continuation d'adapter — doc hebdo 21/07).")
+        if args.resume_from_checkpoint:
+            raise SystemExit("--warm-start-dir et --resume-from-checkpoint sont exclusifs "
+                             "(deux mécanismes de reprise différents).")
+        if not (Path(args.warm_start_dir) / "model.safetensors").exists():
+            raise SystemExit(f"--warm-start-dir : model.safetensors introuvable dans "
+                             f"{args.warm_start_dir}")
+        warm_opt_path = Path(args.warm_start_dir) / "optimizer.pt"
+        if warm_opt_path.exists():
+            warm_opt_cb = WarmStartOptimizerCallback(str(warm_opt_path))
+            callbacks.append(warm_opt_cb)
+        else:
+            print(f"[warm-start] pas d'optimizer.pt dans {args.warm_start_dir} — "
+                  f"les moments Adam repartiront de zéro.", flush=True)
+
     lr_stage_cb = None
     if args.lr_stage_every_epochs > 0 and args.lr_adaptive:
         raise SystemExit("--lr-stage-every-epochs et --lr-adaptive sont exclusifs "
@@ -578,6 +729,35 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
               + (f" — save/restore du best train dans {besttrain_dir}" if besttrain_dir else ""),
               flush=True)
 
+    anchor_cb = None
+    if args.moving_anchor_every_epochs > 0:
+        if args.full_ft:
+            raise SystemExit("--moving-anchor-every-epochs nécessite LoRA : avec PEFT l'ancre "
+                             "KL est « adapter désactivé », c'est elle qu'on déplace par "
+                             "merge-and-restart (en full-FT, utiliser sync_ref_model de TRL).")
+        if args.beta <= 0:
+            raise SystemExit("--moving-anchor-every-epochs sans pénalité KL (--beta 0) n'a "
+                             "pas d'objet.")
+        if args.lr_adaptive or args.lr_stage_every_epochs > 0:
+            raise SystemExit("--moving-anchor-every-epochs est incompatible avec les paliers "
+                             "LR à restore : un restore d'adapter croiserait les ré-ancrages "
+                             "(l'adapter restauré serait relatif à une ancienne base).")
+        if args.moving_anchor_initial_cycle > 0 and not args.resume_from_checkpoint:
+            raise SystemExit("--moving-anchor-initial-cycle > 0 n'a de sens qu'avec "
+                             "--resume-from-checkpoint (reprise d'un run à ancre mobile).")
+        anchors_dir = str(REPO_ROOT / "saves" / "trl_grpo" / f"{args.run_name}_anchors")
+        anchor_cb = schedules.MovingAnchorCallback(
+            every_epochs=args.moving_anchor_every_epochs, anchors_dir=anchors_dir,
+            initial_cycle=args.moving_anchor_initial_cycle)
+        callbacks.append(anchor_cb)
+        print(f"[moving-anchor] ancre KL mobile : merge-and-restart toutes les "
+              f"{args.moving_anchor_every_epochs:g} epochs — snapshots de chaîne dans "
+              f"{anchors_dir}"
+              + (f" (reprise : {args.moving_anchor_initial_cycle} cycles déjà faits, "
+                 f"prochain à l'epoch "
+                 f"{(args.moving_anchor_initial_cycle + 1) * args.moving_anchor_every_epochs:g})"
+                 if args.moving_anchor_initial_cycle else ""), flush=True)
+
     test_eval_cb = None
     if args.eval_every > 0:
         if not args.use_vllm_inprocess:
@@ -589,7 +769,8 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         test_eval_cb = TestEvalCallback(eval_every=args.eval_every, eval_items=args.eval_items,
                                         best_init_score=args.best_init_score, run_name=args.run_name,
                                         fewshot_block=fewshot_block, fewshot_messages=fewshot_messages,
-                                        eval_fn=plan_eval_fn)
+                                        eval_fn=plan_eval_fn, save_optimizer=args.save_best_optimizer,
+                                        delete_before_save=args.best_delete_before_save)
         callbacks.append(test_eval_cb)
         print(f"[test_eval] Éval test set tous les {args.eval_every} steps "
               f"({args.eval_items or 'tous les'} items).", flush=True)
@@ -608,6 +789,136 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         test_eval_cb.trainer_ref = trainer
     if lr_stage_cb is not None:
         lr_stage_cb.trainer_ref = trainer
+    if warm_opt_cb is not None:
+        warm_opt_cb.trainer_ref = trainer
+    if anchor_cb is not None:
+        anchor_cb.trainer_ref = trainer
+
+    # --- Curriculum par échantillonnage : depth par paliers (exp33) ou
+    # --- autocurriculum ALP (exp34, port MAGELLAN — src/train/magellan.py) ---
+    if args.depth_schedule_epochs or args.depth_schedule_auto or args.goal_sampler != "uniform":
+        import json as _json
+        from types import MethodType
+
+        from src.train import magellan as mgl
+
+        n_modes = sum([bool(args.depth_schedule_epochs), bool(args.depth_schedule_auto),
+                       args.goal_sampler != "uniform"])
+        if n_modes > 1:
+            raise SystemExit("--depth-schedule-epochs, --depth-schedule-auto et "
+                             "--goal-sampler sont mutuellement exclusifs.")
+        if args.max_depth or args.depth_exact:
+            raise SystemExit("Le curriculum par échantillonnage travaille sur le dataset "
+                             "ENTIER : incompatible avec --max-depth/--depth-exact.")
+        if getattr(cfg, "dataloader_num_workers", 0):
+            raise SystemExit("Le sampler pondéré lit les poids en direct : "
+                             "dataloader_num_workers doit rester 0.")
+
+        depth_file = REPO_ROOT / "data" / "train" / "textcraft_train_with_depth.json"
+        with depth_file.open() as f:
+            depth_map = _json.load(f)
+        depths = [int(depth_map.get(r["item_id"], 99)) for r in rows]
+        goals = list(range(len(rows)))          # un but = une ligne du dataset
+        depth_of = dict(enumerate(depths))
+
+        magellan_cb = None
+        if args.depth_schedule_auto:
+            # exp33.1 — palier déclenché au reward train (fenêtre = 1 epoch de steps).
+            steps_per_epoch = max(1, len(rows) * args.num_generations
+                                  // args.gradient_accumulation_steps)
+            provider = mgl.DepthAutoScheduleProvider(
+                depths, steps_per_epoch=steps_per_epoch,
+                threshold=args.depth_auto_threshold,
+                max_stage_epochs=args.depth_auto_max_epochs,
+                start_depth=args.depth_auto_start_stage)
+            trainer.add_callback(provider)   # reçoit reward/epoch via on_log
+            prob_fn = provider.probabilities
+            print(f"[depth-auto] curriculum depth déclenché au succès : seuil "
+                  f"{args.depth_auto_threshold} sur {steps_per_epoch} steps (1 epoch), "
+                  f"cap {args.depth_auto_max_epochs:g} epochs/palier"
+                  + (f", REPRISE au palier {args.depth_auto_start_stage}"
+                     if args.depth_auto_start_stage > 1 else ""), flush=True)
+        elif args.depth_schedule_epochs:
+            provider = mgl.DepthScheduleProvider(args.depth_schedule_epochs, depths)
+            provider.trainer_ref = trainer
+            prob_fn = provider.probabilities
+            print(f"[depth-schedule] curriculum depth par paliers : "
+                  f"{args.depth_schedule_epochs} (échantillonnage pondéré, dataset entier)",
+                  flush=True)
+        else:
+            eps = dict(epsilon_start=args.magellan_epsilon_start,
+                       epsilon_end=args.magellan_epsilon_end,
+                       epsilon_decay=args.magellan_epsilon_decay)
+            estimator = None
+            if args.goal_sampler == "online":
+                sampler = mgl.OnlineGoalSampler(goals, **eps,
+                                                buffer_size=args.magellan_buffer_size)
+            elif args.goal_sampler == "ek_depth":
+                sampler = mgl.EKOnlineGoalSampler(goals, depth_of, **eps,
+                                                  buffer_size=args.magellan_buffer_size)
+            else:  # magellan
+                if args.full_ft:
+                    raise SystemExit("--goal-sampler magellan nécessite LoRA (adapters SR "
+                                     "séparés sur le modèle PEFT de la politique).")
+                estimator = mgl.MagellanEstimator(
+                    sr_lr=args.magellan_sr_lr, batch_size=args.magellan_batch_size,
+                    gradient_batch_size=mgl.MAGELLAN_DEFAULTS["gradient_batch_size"],
+                    sr_lora_r=args.magellan_sr_lora_r,
+                    sr_lora_alpha=args.magellan_sr_lora_alpha)
+                texts = mgl.load_goal_texts(
+                    rows, str(REPO_ROOT / "data" / "train" / "textcraft_goal_texts.json"))
+                goal_ids = [tokenizer(t, truncation=True, max_length=2048)["input_ids"]
+                            for t in texts]
+                unwrapped = trainer.accelerator.unwrap_model(trainer.model)
+                estimator.attach(unwrapped, goal_ids,
+                                 tokenizer.pad_token_id or tokenizer.eos_token_id)
+                sampler = mgl.MAGELLANGoalSampler(
+                    goals, estimator, N=args.magellan_N, **eps,
+                    recompute_freq=args.magellan_recompute_freq)
+            magellan_cb = mgl.MagellanCallback(
+                sampler, estimator, buffer_size=args.magellan_buffer_size,
+                batch_size=args.magellan_batch_size, depth_of=depth_of,
+                log_path=str(REPO_ROOT / "logs" / f"magellan_{args.run_name}.jsonl"))
+            magellan_cb.trainer_ref = trainer
+            trainer.add_callback(magellan_cb)
+            trainer._goal_recorder = magellan_cb.record
+            trainer._item_idx_to_row = {r["item_idx"]: i for i, r in enumerate(rows)}
+            prob_fn = sampler.sampling_probs
+            print(f"[magellan] goal sampler '{args.goal_sampler}' actif : "
+                  f"{len(goals)} buts, ε {args.magellan_epsilon_start}→"
+                  f"{args.magellan_epsilon_end} (decay {args.magellan_epsilon_decay}), "
+                  f"recompute /{args.magellan_recompute_freq} steps", flush=True)
+
+        def _weighted_sampler(self, dataset=None):
+            ds = dataset if dataset is not None else self.train_dataset
+            return mgl.WeightedRepeatSampler(
+                data_source=ds,
+                mini_repeat_count=self.num_generations,
+                batch_size=self.args.generation_batch_size // self.num_generations,
+                repeat_count=self.num_iterations * self.args.steps_per_generation,
+                prob_fn=prob_fn, seed=self.args.seed)
+
+        trainer._get_train_sampler = MethodType(_weighted_sampler, trainer)
+
+    if args.warm_start_dir:
+        # APRÈS la création du trainer : le ref model (ancre KL) et le moteur vLLM ont
+        # été construits depuis --model-path (la base). On n'écrase que la POLITIQUE.
+        # TRL resynchronise vLLM avant la 1re génération (global_step != _last_loaded_step
+        # à l'init) → les rollouts du step 0 utilisent bien les poids injectés.
+        from safetensors.torch import load_file
+        ws_path = Path(args.warm_start_dir) / "model.safetensors"
+        ws_state = load_file(str(ws_path))
+        unwrapped = trainer.accelerator.unwrap_model(trainer.model)
+        missing, unexpected = unwrapped.load_state_dict(ws_state, strict=False)
+        if unexpected:
+            raise SystemExit(f"[warm-start] clés inattendues dans {ws_path} : {unexpected[:5]}...")
+        # lm_head.weight absent = normal (tied embeddings Qwen : suit embed_tokens).
+        bad_missing = [k for k in missing if k != "lm_head.weight"]
+        if bad_missing:
+            raise SystemExit(f"[warm-start] poids manquants dans {ws_path} : {bad_missing[:5]}...")
+        print(f"[warm-start] politique initialisée depuis {ws_path} "
+              f"(missing={missing or 'aucun'}) — ancre KL et tokenizer restent {model_path}",
+              flush=True)
 
     resume = args.resume_from_checkpoint if args.resume_from_checkpoint else None
     trainer.train(resume_from_checkpoint=resume)

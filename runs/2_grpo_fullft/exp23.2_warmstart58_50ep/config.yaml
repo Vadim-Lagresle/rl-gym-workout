@@ -1,0 +1,101 @@
+# exp23.2_warmstart58_50ep — continuation du best d'exp23.1 (58/100), ancre KL = Qwen nu
+#
+# Question : le "plateau" 48-58 des 15 dernières évals d'exp23.1 (epochs 80-96)
+# est-il un vrai plateau, ou la rampe continue-t-elle si on pousse ~50 epochs de
+# plus ? (Désaccord assumé sur la lecture du plateau — on tranche empiriquement.)
+#
+# Mécanique de reprise (NOUVEAU --warm-start-dir, validé par smoke GPU 2026-08-08) :
+#   - GRPOTrainer construit sur --model-path Qwen nu → le ref model (ancre KL) est
+#     rechargé par TRL depuis ce chemin (grpo_trainer.py:971, create_model_from_path
+#     sur config._name_or_path) et le tokenizer aussi. sync_ref_model=False (défaut)
+#     → ancre FIGÉE sur Qwen base tout le run, comme dans exp23/23.1.
+#   - Les poids du best (model.safetensors, 6.2 Go) sont ensuite injectés dans la
+#     POLITIQUE seule (load_state_dict strict=False ; missing=lm_head.weight = tied,
+#     suit embed_tokens). TRL resynchronise vLLM avant la 1re génération
+#     (_last_loaded_step=-1) → rollouts du step 0 sur les poids injectés.
+#   - optimizer.pt (8.1 Go, moments Adam 8-bit du step 3854) chargé à on_train_begin
+#     par WarmStartOptimizerCallback (bnb surcharge load_state_dict, dtypes préservés).
+#
+# Validation smoke (8 steps, GPU) : reward 0.91-0.97 dès le 1er rollout (vs ~0.2 pour
+# Qwen nu sur les mêmes items) = vLLM sert bien les poids injectés ; KL 0.055-0.075
+# dès le step 1 = exactement le niveau final d'exp23.1 face à la base (≈0 si l'ancre
+# avait été le best) = l'ancre est bien Qwen nu. 434 états Adam chargés.
+#
+# Hyperparamètres : identiques exp23/23.1 (fiche mère : ../exp23_verl_repro/config.yaml).
+
+run_name: exp23.2_warmstart58_50ep
+date: 2026-08-08
+model: Qwen2.5-3B-Instruct (/tmp/models) + warm-start saves/trl_grpo/exp23.1_verl_100ep_best
+stack: TRL 1.9.2 + vLLM colocate + flash-attention (env v2, reconstruit après purge du 08/08)
+
+method: GRPO full-FT zero-shot, vrai PPO (buffer 256, 4 updates clippées/cycle),
+         warm-start poids+optimiseur du best exp23.1, ancre KL = Qwen base
+
+hyperparams:   # = exp23.1, sauf num_epochs et le warm-start
+  full_ft: true
+  learning_rate: 1.0e-6
+  beta_kl: 0.001
+  entropy_coef: 0.001
+  epsilon_clip: 0.2
+  num_generations: 8
+  steps_per_generation: 256
+  gradient_accumulation_steps: 64
+  num_iterations: 1
+  max_rounds_train: 30
+  max_completion_length: 512
+  vllm_max_len: 32768
+  fewshot: 0
+  num_epochs: 50               # ~2200 steps (44/epoch), ETA ~20 h
+  lr_scheduler: constant
+  optim: adamw_bnb_8bit
+  temperature: 1.0
+  warm_start_dir: saves/trl_grpo/exp23.1_verl_100ep_best
+  best_init_score: 0.58        # ne sauver un best QUE s'il dépasse le 58 du parent
+
+persistence:
+  best_test: saves/trl_grpo/exp23.2_warmstart58_50ep_best (modèle 6.2 Go + optimizer.pt 8.1 Go,
+             écrit seulement si Pass@1 > 58)
+  checkpoints: /tmp/trl_grpo_runs (volatils, save_steps 94, limit 1)
+  note_disque: optimizer.pt du best exp23.1 supprimé après le warm-start (rôle rempli,
+               validé explicitement) ; les POIDS du 58 restent. wandb local purgé. 15 Go libres.
+
+eval_every_steps: 47
+eval_items: 100
+
+reference_exp23_1:   # ce que ce run doit dépasser pour être intéressant
+  best_parent: 58/100 @ step 3854 (epoch 87.6)
+  plateau_contesté: "15 dernières évals (ep 80-96) : 48-58 sans tendance nette"
+
+launch:
+  date: 2026-08-08 ~15h55 (setsid, session propre)
+  pid: 3747298
+  log: logs/exp23.2_warmstart58_50ep.log
+  wandb: https://wandb.ai/v-lagresle-criteo/rl-gym-workout/runs/lnq0jmwo
+  sante_step8: "KL 0.044 (= niveau final exp23.1 → poids bien injectés, ancre = base),
+    clip actif, entropie 0.73, grad_norm 0.70, ~71 Go GPU"
+
+incidents:
+  - "ERREUR D'ORDONNANCEMENT (assistant) : optimizer.pt du best exp23.1 supprimé lors
+    du nettoyage disque AVANT le lancement du vrai run (le smoke l'avait chargé, le
+    run réel non). Les moments Adam du step 3854 sont perdus — le run tourne avec
+    poids warm-startés mais Adam RÉINITIALISÉ. Impact attendu : réchauffage de
+    quelques dizaines de steps à LR constant 1e-6 (bias correction Adam), pas de
+    conséquence qualitative attendue sur la question du plateau. Leçon : ne nettoyer
+    les artefacts de reprise qu'APRÈS vérification du chargement par le run réel."
+
+results:
+  best: "64/100 @ step 1128 (epoch ~25.6) — NOUVEAU BEST DU PROJET, sauvé avec optimizer.pt"
+  mort: "step 1292/2200 (epoch ~29.4), nuit du 08-09/08 — purge /tmp (3e en 10 jours)."
+  courbe_test: |
+    Reprise directe dans la zone du parent puis nouvelle rampe — PAS de plateau :
+    steps 47-611 : 48-53 (léger creux post-warm-start, cohérent avec l'Adam
+    réinitialisé) ; steps 658-940 : 51 → 57 ; steps 987-1269 : 58 → 64 (pic) → 58,
+    54, 59. Les 5 dernières évals restent vivantes (54-64), pas de saturation.
+
+verdict: |
+  Le "plateau 48-58" d'exp23.1 n'en était PAS un : +6 points en ~29 epochs de
+  continuation (58 → 64), la rampe lente de la recette verl-sur-TRL continue.
+  L'ancre KL sur Qwen nu n'a pas empêché la progression. L'Adam réinitialisé
+  (incident) a probablement coûté le petit creux initial (48-53 sur ~13 epochs)
+  mais pas la dynamique. → exp23.3 : même continuation depuis le 64, avec cette
+  fois les moments Adam du best (optimizer.pt présent et chargé AVANT tout ménage).

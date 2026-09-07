@@ -1,0 +1,79 @@
+# exp25 — LoRA r8 + ancre KL MOBILE (merge-and-restart) — décidée le 2026-08-17
+run_name: exp25_r8_anchor4ep
+famille: 13_moving_anchor
+statut: en file (runs/queue/30_..., après le job 24 de la grille exp24)
+
+hypothese: >
+  Le plafond ~27-29 de l'arm β0.01 d'exp24 vient du rappel KL vers Qwen nu qui
+  croît à mesure que la politique s'améliore (l'ancre FIXE devient de plus en
+  plus contraignante). Une ancre MOBILE (re-basée toutes les 4 epochs sur la
+  politique courante) garde le rôle stabilisateur local de la KL (anti-collapse,
+  leçon β0.001 d'exp24) sans le frein global — la politique peut s'éloigner de
+  Qwen nu par paliers de confiance.
+
+mecanisme: >
+  schedules.MovingAnchorCallback (--moving-anchor-every-epochs 4) : à chaque
+  frontière, (1) snapshot de l'adapter dans saves/trl_grpo/<run>_anchors/cycle<k>,
+  (2) fusion de l'adapter dans la base (flag merged oublié : jamais défusionné),
+  (3) adapter réinitialisé en place (A=kaiming, B=0 — politique inchangée),
+  (4) moments Adam LoRA purgés. L'ancre TRL-PEFT (« adapter désactivé ») devient
+  la politique du point de ré-ancrage. Reconstruction d'un artefact adapter-only :
+  src/utils/merge_anchor_chain.py (base ⊕ cycle1 ⊕ … ⊕ adapter).
+  Validé par selftest CPU (python src/train/schedules.py) + smoke GPU intégré
+  au job de file (ré-ancrage réel à ~step 2 avant de lancer le run).
+
+config:
+  base_model: /tmp/models/Qwen2.5-3B-Instruct
+  lora_r: 8            # blog Thinking Machines : petit rang suffit en RL (vérifié exp24 : r16 ≥ r32 > r64)
+  lora_alpha: 32
+  learning_rate: 3e-6  # constant — zone de travail mesurée exp24 (3× full-FT)
+  beta_kl: 0.01        # la valeur validée par l'ablation exp24 (zéro collapse)
+  moving_anchor_every_epochs: 4   # ré-ancrages aux epochs 4, 8, 12
+  batch: 64 traj/update ON-POLICY (grad_accum 64, PAS de --steps-per-generation)
+  # ↑ retour au batch 64 demandé le 17/08 : caveat gros batch LoRA du blog
+  # (la pénalité de la paramétrisation B·A n'est pas rattrapable par le rang)
+  num_generations: 8
+  entropy_coef: 0.001
+  epochs: 15           # ~705 steps — comparable à la grille exp24
+  fewshot: 0 (zero-shot)
+  max_rounds: 30
+  eval: 47 steps / 100 items ; best adapter → saves/trl_grpo/<run>_best (seuil -1)
+
+grille_de_lecture: >
+  Comparer à exp24_r64_lr3e-6_b0.01 (stable 21-29, fin 27) et au pic 35 de
+  r16/β0.001 (collapse ensuite). Succès = dépasser ~30 SANS collapse en 2e
+  moitié. Surveiller wandb anchor/cycle et les lignes [moving-anchor] ; la KL
+  doit RETOMBER ~0 juste après chaque ré-ancrage (distance au nouveau point)
+  puis remonter — un run qui re-collapse après un ré-ancrage signifierait que
+  l'ancre fixe n'était pas le (seul) stabilisateur.
+
+resultats:
+  statut: terminé 2026-08-18 (fin propre, 658 steps / 15 epochs)
+  evals_pass1: [12, 13, 11, 18, 27, 31, 30, 24, 30, 26, 32, 31, 30, 35]
+  best: 35/100 @ step 658 — LA DERNIÈRE éval (run encore ascendant à l'arrêt)
+  re_ancrages: steps 184/368/552 (epochs 4/8/12) — exécutés proprement, aucune
+    déstabilisation post-ancre (évals suivantes stables)
+  lecture: >
+    Égale le record de la grille exp24 (35, r16/β0.001) avec r8, batch 64 on-policy,
+    et SANS collapse — là où β0.001 explosait et β0.01 fixe plafonnait (r64 : 27-29).
+    Nuance : r16/β0.01 FIXE a pointé plus haut (39 @ ep 7) mais en zigzag (chute à 10
+    ep ~12, remonte 24-25). L'ancre mobile est plus lente mais plus propre, et le cut
+    à 15 ep a probablement laissé des points sur la table.
+  suites_candidates: >
+    (1) même config, budget 30-50 ep (le best était la dernière éval) ;
+    (2) ablation r16-mobile pour découpler rang et ancre vs le 39 de r16-fixe ;
+    (3) période de ré-ancrage 2 ep vs 4 ep.
+
+suite_200ep:  # décision 2026-08-18 (soutenance < 1 mois : stabiliser LoRA 3B vite)
+  job: runs/queue/40_exp25_resume_200ep.sh
+  mode: reprise exacte — --resume-from-checkpoint /tmp/.../checkpoint-690
+    (adapter + optimizer.pt + compteurs, epoch 15.0) sur base ancrée
+    /tmp/models/exp25_anchor3_base = Qwen3B ⊕ cycles 1-3 (merge_anchor_chain.py)
+  garde_fous:
+    - --moving-anchor-initial-cycle 3 (nouveau flag) : prochain ré-ancrage à l'epoch 16,
+      sans quoi le callback enchaînerait 3 ré-ancrages parasites dès la reprise
+      (et purgerait aussitôt les moments Adam repris)
+    - --best-init-score 0.35 : le best (35) n'est remplacé que si battu
+    - branche SCRATCH intégrée : si /tmp a été purgé, même expé de 0 sur 200 epochs
+      (anciens _anchors/_best archivés en *_run1)
+  num_epochs: 200 (≈ 9200 steps au total, reprise à 690)

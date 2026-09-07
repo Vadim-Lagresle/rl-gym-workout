@@ -40,6 +40,11 @@ MAX_SIM_ROUNDS = 20  # cap training — l'éval utilise 30 (periodic_eval.EVAL_M
 # Fixés par train_grpo.main() depuis la CLI (assignation d'attribut de module).
 MAX_ROUNDS_SCHEDULE: list[tuple[int, int]] | None = None
 MAX_ROUNDS_SCHEDULE_EPOCHS: list[tuple[float, int]] | None = None
+# Curriculum du budget de sortie PAR TOUR (exp35, ajout 2026-08-26) : même format
+# et même mécanique que ScalingInter, mais pilote max_tokens de la génération
+# (rollout.py) au lieu du nombre de tours. Epoch-based uniquement.
+MAX_COMPLETION_SCHEDULE_EPOCHS: list[tuple[float, int]] | None = None
+_LAST_COMPLETION_CAP: int | None = None  # trace [completion-schedule] au changement
 
 
 def _parse_rounds_schedule(spec: str, thr_cast):
@@ -99,6 +104,34 @@ def log_schedule_state(trainer: Any, cap: int) -> None:
     elif MAX_ROUNDS_SCHEDULE is not None:
         step = int(getattr(getattr(trainer, "state", None), "global_step", 0) or 0)
         print(f"[scaling-inter] step={step} max_rounds={cap}", flush=True)
+
+
+def parse_max_completion_schedule_epochs(spec: str) -> list[tuple[float, int]]:
+    """Schedule epoch-based du budget de sortie par tour, format '<max_tokens>:<epoch>'
+    (même convention valeur-d'abord que ScalingInter), e.g. '256:0,512:15,1024:35'."""
+    return _parse_rounds_schedule(spec, float)
+
+
+def current_max_completion(trainer: Any, default: int) -> int:
+    """Budget max_tokens actif pour la génération d'UN tour (consommé par
+    rollout.py à chaque round). Sans schedule : `default` (= la valeur CLI
+    --max-completion-length, comportement historique inchangé). Avec schedule :
+    palier de l'epoch courante ; trace [completion-schedule] à chaque changement."""
+    global _LAST_COMPLETION_CAP
+    if MAX_COMPLETION_SCHEDULE_EPOCHS is None:
+        return default
+    state = getattr(trainer, "state", None)
+    epoch = float(getattr(state, "epoch", 0.0) or 0.0) if state is not None else 0.0
+    cap = default
+    for thr_epoch, thr_tokens in MAX_COMPLETION_SCHEDULE_EPOCHS:
+        if epoch >= thr_epoch:
+            cap = thr_tokens
+    if cap != _LAST_COMPLETION_CAP:
+        step = int(getattr(state, "global_step", 0) or 0) if state is not None else 0
+        print(f"[completion-schedule] step={step} epoch={epoch:.2f} max_tokens={cap}",
+              flush=True)
+        _LAST_COMPLETION_CAP = cap
+    return cap
 
 
 def apply_lr_beta(trainer: Any, lr: float, beta: float, optimizer: Any = None) -> None:
@@ -611,6 +644,112 @@ class StagedBestRestoreCallback(TrainerCallback):
 # Selftest à sec (CPU) : python -m src.train.schedules
 # ---------------------------------------------------------------------------
 
+class MovingAnchorCallback(TrainerCallback):
+    """Ancre KL MOBILE pour LoRA (exp25) : « merge-and-restart » périodique.
+
+    Contexte : avec PEFT, TRL n'a pas de modèle de référence séparé — l'ancre KL
+    est « le modèle avec adapter désactivé », c.-à-d. les poids de BASE (Qwen nu).
+    Sur un run long, le rappel beta·KL vers la base devient de plus en plus
+    contraignant à mesure que la politique s'améliore (plafond ~27-29 de l'arm
+    β0.01 d'exp24). TRL propose sync_ref_model (TR-DPO) mais lève explicitement
+    NotImplementedError avec PEFT — d'où cette implémentation.
+
+    À chaque frontière de N epochs (détectée à on_step_end) :
+      1. snapshot de l'adapter courant dans <anchors_dir>/cycle<k> (~qq Mo, home) :
+         le modèle reste reconstructible à tout moment comme
+         base ⊕ merge(cycle1) ⊕ … ⊕ merge(cycle_k) ⊕ adapter_courant
+         (script : src/utils/merge_anchor_chain.py) ;
+      2. FUSION de l'adapter dans les poids de base (merge_adapter), puis OUBLI
+         du flag `merged_adapters` : le delta appartient désormais à la base et
+         ne sera JAMAIS défusionné (un unmerge ultérieur soustrairait les
+         nouvelles matrices A/B, pas celles qui ont été fusionnées) ;
+      3. réinitialisation de l'adapter EN PLACE (reset_lora_parameters :
+         A=kaiming, B=0). La POLITIQUE est fonctionnellement inchangée (delta ≡ 0)
+         mais l'ancre (adapter désactivé) devient la politique de ce point ;
+      4. purge des moments Adam des paramètres LoRA (mêmes tenseurs donc
+         l'optimizer reste valide, mais les moments décrivent l'ancien paysage).
+
+    vLLM colocate : rien à faire — la politique étant identique, les poids déjà
+    chargés restent corrects, et la sync TRL suivante (merge du nouvel adapter ≈ 0
+    sur la base modifiée) reproduit les mêmes tenseurs.
+
+    Effet de bord assumé (blog Thinking Machines) : B=0 relance le « warmup
+    implicite » du LR effectif à chaque cycle — le run alterne donc des phases
+    lentes post-ré-ancrage et des phases pleines, au bénéfice d'une KL qui
+    mesure toujours la distance au DERNIER point de confiance et non à Qwen nu.
+    """
+
+    def __init__(self, every_epochs: float, anchors_dir: str,
+                 initial_cycle: int = 0) -> None:
+        self.every = every_epochs
+        self.anchors_dir = anchors_dir
+        # initial_cycle > 0 : reprise (--resume-from-checkpoint) d'un run qui a déjà
+        # ré-ancré `initial_cycle` fois — sans quoi la frontière (cycle+1)·every serait
+        # déjà dépassée à la reprise et le callback enchaînerait des ré-ancrages
+        # parasites dès le 1er step (purge immédiate des moments Adam repris).
+        self.cycle = initial_cycle
+        self.trainer_ref: Any = None
+
+    def on_step_end(self, targs: Any, state: Any, control: Any, **kwargs: Any) -> None:
+        if state.epoch is None or state.epoch + 1e-9 < (self.cycle + 1) * self.every:
+            return
+        import json
+        import os
+        import time
+
+        import torch
+        from peft.tuners.lora.layer import LoraLayer
+
+        t0 = time.time()
+        self.cycle += 1
+        model = self.trainer_ref.accelerator.unwrap_model(self.trainer_ref.model)
+
+        # 1. Snapshot de l'adapter sortant (maillon k de la chaîne).
+        cycle_dir = os.path.join(self.anchors_dir, f"cycle{self.cycle}")
+        model.save_pretrained(cycle_dir)
+
+        with torch.no_grad():
+            # 2. Fusion dans la base + oubli du merge (délibérément jamais défusionné).
+            model.merge_adapter()
+            n_layers = 0
+            for module in model.modules():
+                if isinstance(module, LoraLayer) and module.merged:
+                    # 3. Adapter neuf en place (mêmes objets Parameter → l'optimizer
+                    #    et ses param_groups restent valides sans reconstruction).
+                    #    On ne réinitialise QUE les adapters effectivement fusionnés
+                    #    (= actifs, la politique) : un modèle multi-adapters (exp34
+                    #    MAGELLAN : sr_adapters/delayed_adapters sur le même modèle)
+                    #    garderait sinon un estimateur écrasé à chaque ré-ancrage.
+                    merged_names = list(module.merged_adapters)
+                    module.merged_adapters.clear()
+                    for name in merged_names:
+                        module.reset_lora_parameters(name, True)
+                    n_layers += 1
+
+        # 4. Moments Adam des params LoRA : purge (torch les recrée à zéro au
+        #    prochain step, lazy). L'optimizer peut être wrappé (accelerate).
+        opt = self.trainer_ref.optimizer
+        while hasattr(opt, "optimizer"):
+            opt = opt.optimizer
+        # Restreint à l'adapter POLITIQUE (.default.) : les adapters SR de MAGELLAN
+        # (exp34) ont leur propre optimizer, jamais touché ici.
+        lora_params = [p for n, p in model.named_parameters()
+                       if "lora_" in n and ".default." in n]
+        n_purged = sum(1 for p in lora_params if opt.state.pop(p, None) is not None)
+
+        with open(os.path.join(self.anchors_dir, "chain.jsonl"), "a") as f:
+            f.write(json.dumps({"cycle": self.cycle, "step": state.global_step,
+                                "epoch": round(float(state.epoch), 3)}) + "\n")
+        print(f"[moving-anchor] >>> RÉ-ANCRAGE #{self.cycle} @ step {state.global_step} "
+              f"(epoch {state.epoch:.2f}) : adapter sauvé ({cycle_dir}), fusionné dans "
+              f"la base ({n_layers} couches), adapter réinitialisé (A=kaiming, B=0), "
+              f"{n_purged} états Adam purgés — l'ancre KL est désormais la politique de "
+              f"ce point ({time.time() - t0:.1f}s)", flush=True)
+        if self.trainer_ref is not None and hasattr(self.trainer_ref, "log"):
+            self.trainer_ref.log({"anchor/cycle": float(self.cycle),
+                                  "anchor/step": float(state.global_step)})
+
+
 if __name__ == "__main__":
     from types import SimpleNamespace
 
@@ -768,3 +907,91 @@ if __name__ == "__main__":
     print(f"[schedules] selftest StagedBestRestore OK — {len(saves)} save(s), "
           f"1 restore à la frontière, {len(promotes)} promotion(s) globale(s), "
           f"lr final {cb5._lr:.3e}, beta {cb5._beta:.3e}")
+
+    # ---- Selftest 6 : MovingAnchorCallback (exp25) — invariance de la politique,
+    # déplacement de l'ancre, purge Adam, snapshot de la chaîne. CPU, ~2 s.
+    import os
+    import tempfile
+
+    import torch
+    from peft import LoraConfig as _LoraConfig, get_peft_model
+    from torch import nn
+
+    class _Tiny(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = nn.Linear(16, 16, bias=False)
+
+        def forward(self, x: torch.Tensor) -> torch.Tensor:
+            return self.proj(x)
+
+    torch.manual_seed(0)
+    pm = get_peft_model(_Tiny(), _LoraConfig(r=4, lora_alpha=32, target_modules=["proj"]))
+    with torch.no_grad():  # simule un adapter APPRIS (B ≠ 0, sinon delta ≡ 0)
+        for n, p in pm.named_parameters():
+            if "lora_B" in n:
+                p.add_(torch.randn_like(p) * 0.1)
+    opt6 = torch.optim.AdamW([p for p in pm.parameters() if p.requires_grad], lr=1e-3)
+    x6 = torch.randn(4, 16)
+    pm(x6).sum().backward()
+    opt6.step()  # crée des moments Adam
+    policy_before = pm(x6).detach().clone()
+    with pm.disable_adapter():
+        anchor_before = pm(x6).detach().clone()
+    assert not torch.allclose(policy_before, anchor_before), "l'adapter simulé doit avoir un effet"
+    assert len(opt6.state) > 0, "moments Adam attendus avant ré-ancrage"
+
+    tmp6 = tempfile.mkdtemp()
+    cb6 = MovingAnchorCallback(every_epochs=2.0, anchors_dir=tmp6)
+    cb6.trainer_ref = SimpleNamespace(model=pm,
+                                      accelerator=SimpleNamespace(unwrap_model=lambda m: m),
+                                      optimizer=opt6, log=lambda d: None)
+    cb6.on_step_end(None, SimpleNamespace(epoch=1.96, global_step=92), None)
+    assert cb6.cycle == 0, "pas de ré-ancrage avant la frontière"
+    cb6.on_step_end(None, SimpleNamespace(epoch=2.02, global_step=95), None)
+    assert cb6.cycle == 1, "ré-ancrage attendu à la frontière"
+    assert torch.allclose(policy_before, pm(x6).detach(), atol=1e-5), \
+        "la POLITIQUE ne doit pas changer au ré-ancrage (merge + adapter nul)"
+    with pm.disable_adapter():
+        anchor_after = pm(x6).detach()
+    assert torch.allclose(anchor_after, policy_before, atol=1e-5), \
+        "l'ANCRE doit devenir la politique du point de ré-ancrage"
+    for n, p in pm.named_parameters():
+        if "lora_B" in n:
+            assert float(p.abs().max()) == 0.0, "B doit être réinitialisé à zéro"
+    assert len(opt6.state) == 0, "moments Adam des params LoRA purgés"
+    assert os.path.exists(os.path.join(tmp6, "cycle1", "adapter_model.safetensors"))
+    assert os.path.exists(os.path.join(tmp6, "chain.jsonl"))
+    cb6.on_step_end(None, SimpleNamespace(epoch=2.5, global_step=110), None)
+    assert cb6.cycle == 1, "pas de re-déclenchement avant la frontière suivante"
+
+    # Reprise (--resume-from-checkpoint) : initial_cycle=3 → aucun ré-ancrage parasite
+    # aux epochs 15.x (frontière suivante = 16), là où cycle=0 en aurait enchaîné 3.
+    cb7 = MovingAnchorCallback(every_epochs=4.0, anchors_dir=tempfile.mkdtemp(),
+                               initial_cycle=3)
+    cb7.on_step_end(None, SimpleNamespace(epoch=15.02, global_step=691), None)
+    cb7.on_step_end(None, SimpleNamespace(epoch=15.98, global_step=735), None)
+    assert cb7.cycle == 3, "reprise : pas de ré-ancrage avant l'epoch 16"
+    print("[schedules] selftest MovingAnchor OK — politique invariante, ancre déplacée, "
+          "B=0, moments purgés, chaîne écrite, reprise sans ré-ancrage parasite")
+
+    # — Test : schedule du budget de sortie par tour (exp35) —
+    # (le bloc __main__ est le module lui-même : on assigne la globale en direct)
+    assert parse_max_completion_schedule_epochs("256:0,512:15,1024:35") == \
+        [(0.0, 256), (15.0, 512), (35.0, 1024)]
+    t8 = SimpleNamespace(state=SimpleNamespace(epoch=0.0, global_step=0))
+    MAX_COMPLETION_SCHEDULE_EPOCHS = None
+    assert current_max_completion(t8, default=512) == 512  # sans schedule : la CLI
+    MAX_COMPLETION_SCHEDULE_EPOCHS = [(0.0, 256), (15.0, 512), (35.0, 1024)]
+    assert current_max_completion(t8, default=1024) == 256
+    t8.state.epoch = 14.99
+    assert current_max_completion(t8, default=1024) == 256
+    t8.state.epoch = 15.0
+    assert current_max_completion(t8, default=1024) == 512
+    t8.state.epoch = 60.0
+    assert current_max_completion(t8, default=1024) == 1024
+    t8.state = None  # avant le 1er step (trainer.state absent) : palier epoch 0
+    assert current_max_completion(t8, default=1024) == 256
+    MAX_COMPLETION_SCHEDULE_EPOCHS = None
+    print("[schedules] selftest completion-schedule OK — paliers epoch, fallback CLI, "
+          "état absent = palier 0")

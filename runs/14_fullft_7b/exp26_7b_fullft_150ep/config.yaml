@@ -1,0 +1,39 @@
+# exp26 — full-FT Qwen2.5-7B, recette exp23 à l'identique, 150 epochs — décidée le 2026-08-17
+run_name: exp26_7b_fullft_150ep
+famille: 14_fullft_7b
+statut: en file (runs/queue/32_..., précédé du pass@20 base — job 31)
+
+objectif: >
+  Vérifier les chiffres du papier AgentGym-RL sur le 7B avec notre stack TRL,
+  et mesurer ce que le scale du modèle de base change : baseline plus haute,
+  mur depth 3-4 déplacé ?, vitesse de montée. Étude pass@20 test set AVANT
+  (job 31, 7B nu) et APRÈS (job 33, best exp26) pour voir si le RL déplace la
+  frontière de support ou ne fait que fiabiliser (lecture 1 bit/épisode).
+
+config:
+  base_model: /tmp/models/Qwen2.5-7B-Instruct   # ensure_qwen_tmp.sh <dest> <repo>
+  recette: exp23 à l'identique — full-FT, LR 1e-6 constant, beta 0.001,
+    vrai PPO (buffer 256 → 4 updates clippées eps 0.2), entropie 0.001,
+    zero-shot, max_rounds 30, N=8, adamw_bnb_8bit (auto)
+  epochs: 150 (~6600 steps)
+  vllm_gpu_util: 0.2   # 38 Go — poids 7B (15.2) + KV cache 32k
+  eval: 47 steps / 100 items
+
+duree_attendue: 7-11 jours GPU (~25-40 steps/h, 2.4× les FLOPs du 3B) — arrêt
+  manuel de Vadim si plafond ou collapse. Smoke mémoire 2 steps intégré au job
+  (OOM détecté AVANT de lancer 150 epochs).
+
+politique_disque: >
+  Le home (35 Go) ne peut PAS héberger un best 7B + optimizer (15+15 Go) ni deux
+  modèles pendant un swap atomique. Donc : best = POIDS SEULS sur le home, avec
+  --best-delete-before-save (l'ancien best est supprimé AVANT d'écrire le
+  nouveau — fenêtre de quelques minutes sans best complet, assumée) ; PAS de
+  --save-best-optimizer ; ckpts périodiques sur /tmp (volatils, save-steps 94).
+
+reperes:
+  baseline_3B_sans_training: 18/100
+  best_3B_projet (exp23.4): 69/100 (~247 epochs cumulées)
+  papier_3B: 75/100
+  qwen3.5_4B_sans_training: 77/100
+
+resultats: (à remplir — Pass@1 périodique + pass@20 avant/après)

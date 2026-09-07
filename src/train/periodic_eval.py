@@ -153,9 +153,20 @@ class TestEvalCallback(TrainerCallback):
     def __init__(self, eval_every: int, eval_items: int, best_init_score: float,
                  run_name: str, fewshot_block: str | None = None,
                  fewshot_messages: list[dict] | None = None,
-                 eval_fn: Any = None) -> None:
+                 eval_fn: Any = None, save_optimizer: bool = False,
+                 delete_before_save: bool = False) -> None:
         self.eval_every = eval_every
         self.eval_items = eval_items
+        # Mode gros modèle (7B full-FT, exp26) : le home (35 Go) ne peut pas
+        # héberger DEUX modèles pendant le swap atomique .tmp → dir (pic 2×15 Go).
+        # delete_before_save supprime l'ancien best AVANT d'écrire le nouveau :
+        # pic disque = 1 modèle, au prix d'une fenêtre de quelques minutes sans
+        # best complet sur le home (risque assumé, documenté runs/14_fullft_7b).
+        self.delete_before_save = delete_before_save
+        # Sauver aussi optimizer.pt avec le best (reprise à moments Adam cohérents,
+        # leçon exp22.1). Full-FT 3B 8-bit : ~6.2 Go — l'ordre des écritures dans
+        # on_step_end est pensé pour plafonner le pic disque (voir commentaires).
+        self.save_optimizer = save_optimizer
         # Fonction d'éval interchangeable (même signature que run_test_eval) :
         # le mode plan (exp21, rollout_plan.run_plan_test_eval) évalue en
         # single-turn avec le protocole de SON training ; le save-best et le
@@ -196,8 +207,22 @@ class TestEvalCallback(TrainerCallback):
         if score >= self.best_score:
             import shutil
             tmp = self.best_dir + ".tmp"
+            swap_ok = False
             try:
                 shutil.rmtree(tmp, ignore_errors=True)
+                if self.delete_before_save:
+                    # Pic disque = 1 seul modèle (voir __init__) — le swap final
+                    # os.replace reste valide (best_dir absent = simple rename).
+                    shutil.rmtree(self.best_dir, ignore_errors=True)
+                if self.save_optimizer:
+                    # Supprimer l'ancien optimizer.pt AVANT d'écrire le nouveau modèle :
+                    # plafonne le pic disque à ancien_modèle + nouveau_modèle + rien
+                    # (au lieu de + ancien optimizer). Fenêtre de risque assumée : si le
+                    # run meurt pendant l'écriture du modèle, le best précédent reste
+                    # complet côté poids mais sans optimiseur.
+                    old_opt = os.path.join(self.best_dir, "optimizer.pt")
+                    if os.path.exists(old_opt):
+                        os.remove(old_opt)
                 unwrapped = self.trainer_ref.accelerator.unwrap_model(self.trainer_ref.model)
                 is_peft = (hasattr(unwrapped, "merge_adapter")
                            and hasattr(unwrapped, "unmerge_adapter"))
@@ -217,10 +242,33 @@ class TestEvalCallback(TrainerCallback):
                       f"(ancien {100*self.best_score:.0f}%) sauvé sur disque persistant: "
                       f"{self.best_dir}", flush=True)
                 self.best_score = score
+                swap_ok = True
             except Exception as e:
                 shutil.rmtree(tmp, ignore_errors=True)
                 print(f"[test_eval] !!! SAUVEGARDE BEST ÉCHOUÉE step {state.global_step}: "
                       f"{e!r} — ancien best conservé, training continue.", flush=True)
+
+            if self.save_optimizer and swap_ok:
+                # APRÈS le swap du modèle (jamais dans le .tmp : ça doublerait le pic
+                # disque). Écriture en .tmp + os.replace : un optimizer.pt présent est
+                # toujours complet. Un échec ici ne perd ni le best ni le run.
+                try:
+                    import torch
+                    t_opt = time.time()
+                    opt_tmp = os.path.join(self.best_dir, "optimizer.pt.tmp")
+                    torch.save(self.trainer_ref.optimizer.state_dict(), opt_tmp)
+                    os.replace(opt_tmp, os.path.join(self.best_dir, "optimizer.pt"))
+                    sz_gb = os.path.getsize(os.path.join(self.best_dir, "optimizer.pt")) / 1e9
+                    print(f"[test_eval] optimizer.pt sauvé avec le best "
+                          f"({sz_gb:.1f} Go, {time.time() - t_opt:.0f}s)", flush=True)
+                except Exception as e:
+                    try:
+                        os.remove(os.path.join(self.best_dir, "optimizer.pt.tmp"))
+                    except OSError:
+                        pass
+                    print(f"[test_eval] !!! SAUVEGARDE OPTIMIZER ÉCHOUÉE step "
+                          f"{state.global_step}: {e!r} — best (poids) intact, training continue.",
+                          flush=True)
 
         metrics["best_pass_at_1"] = max(score, self.best_score)
         self.trainer_ref.log({f"eval/{k}": v for k, v in metrics.items()})

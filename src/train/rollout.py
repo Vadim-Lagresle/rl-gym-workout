@@ -31,7 +31,7 @@ from agentenv.envs import TextCraftEnvClient
 
 from src.train import vllm_engine
 from src.train.data import ENV_SERVER_URL, ITEM_TAG_RE
-from src.train.schedules import current_max_rounds, log_schedule_state
+from src.train.schedules import current_max_completion, current_max_rounds, log_schedule_state
 
 
 def count_actions(text: str) -> int:
@@ -56,6 +56,7 @@ class Episode:
     prompt_ids: list[int]     # prompt rendu au round 0 (finit par le generation prompt)
     turns: list[Turn]
     reward: float             # max des rewards env observés (sparse 0/1 en pratique)
+    item_idx: int = -1        # idx env de l'item (marqueur <ITEM_IDX:n>) — autocurriculum
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +91,7 @@ def collect_episodes(prompts: list[list[dict[str, str]]], trainer: Any) -> list[
             raise ValueError(f"Missing item marker in prompt[{i}] last user message: {content!r}")
         env = TextCraftEnvClient(env_server_base=ENV_SERVER_URL, data_len=10000, timeout=60)
         env.reset(int(m.group(1)))
+        episodes[i].item_idx = int(m.group(1))
         states[i][-1]["content"] = content.replace(m.group(0), env.observe()).strip()
         env_clients.append(env)
 
@@ -116,7 +118,10 @@ def collect_episodes(prompts: list[list[dict[str, str]]], trainer: Any) -> list[
                 # appel (prefix caching).
                 round_completion_ids, round_logprobs = vllm_engine.generate_round(
                     trainer, tokenizer, states, active,
-                    max_tokens=trainer.args.max_completion_length,
+                    # Palier éventuel du budget/tour (--max-completion-schedule-epochs,
+                    # exp35) ; sans schedule = la valeur CLI, comportement inchangé.
+                    max_tokens=current_max_completion(
+                        trainer, trainer.args.max_completion_length),
                 )
             else:
                 # HF _generate_single_turn : ré-encode le contexte complet à chaque round.
@@ -242,6 +247,13 @@ def episodes_to_trl_batch(episodes: list[Episode], tokenizer: Any) -> dict[str, 
 def grpo_rollout_func(prompts: list[list[dict[str, str]]], trainer: Any) -> dict[str, Any]:
     """rollout_func GRPO pur : collecte interactive + mise à plat TRL."""
     episodes = collect_episodes(prompts, trainer)
+    # Autocurriculum (exp34/magellan.py) : pousse (ligne dataset, succès) vers le
+    # callback — _goal_recorder et _item_idx_to_row sont posés par train_grpo.py.
+    recorder = getattr(trainer, "_goal_recorder", None)
+    if recorder is not None:
+        row_of = trainer._item_idx_to_row
+        recorder([(row_of[ep.item_idx], ep.reward) for ep in episodes
+                  if ep.item_idx in row_of])
     batch = episodes_to_trl_batch(episodes, trainer.processing_class)
     n_turns = batch.pop("_n_turns")
     print(

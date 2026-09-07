@@ -75,5 +75,17 @@ launch:
     aident déjà) ; clip_ratio non nuls aux updates 2-4 (PPO actif) ; entropie ~0.9 ;
     KL ~0.001 ; grad_norm ~0.4"
 
-results: (à compléter)
-verdict: (à compléter)
+results:
+  best: 40/100 @ step 1175 (epoch ~26.7) — atteint aussi aux steps 1034 et 1128
+  courbe_test: "15 (ep1) → 20 (ep4) → 28 (ep5) → 33 (ep10) → 36 (ep16) → 40 (ep22-27) → 33 (dernier point, ep30)"
+  fin: 2026-08-05 22:44 (~13.4 h pour 30 epochs / 1410 steps)
+  best_supprime: 2026-08-06 (ménage disque validé — re-dérivable par exp23.1, même recette)
+
+verdict: |
+  La recette verl traduite sur TRL apprend proprement (pas de collapse, KL saine,
+  clipping actif) mais N'ATTEINT PAS le niveau de nos runs LoRA few-shot (49-54)
+  en 30 epochs, et encore moins le 75 du papier. Point clé : la courbe test
+  montait ENCORE à l'arrêt (40 aux epochs 22-27, sans plateau) — le budget de
+  30 epochs est peut-être le facteur limitant. → exp23.1 : même recette, 100
+  epochs. En parallèle, réplication sur leur VRAI code verl prévue sur 8×H100
+  Nebius (voir setup/setup_verl_h100.sh) pour isoler ce qui manque à la traduction.

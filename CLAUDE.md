@@ -166,15 +166,24 @@ setsid nohup python src/train/train_grpo.py \
 | **Best train** | max de la moyenne roulante du reward TRAIN (`RewardAdaptiveLrCallback`) | `saves/trl_grpo/<run>_besttrain` | ~480 Mo adapter + ~960 Mo `optimizer.pt` |
 | Archive des best clos | — | `saves/keep_best/` (README par run) | idem |
 
-- Checkpoints périodiques (`--output-root /tmp/trl_grpo_runs`) : sur `/tmp`, volatils — ne
-  **pas** compter dessus pour reprendre après purge pod.
+- Checkpoints périodiques : **sur le home** (`--output-root saves/trl_grpo_ckpt`, `--save-total-limit 1`)
+  pour tout run LoRA (~180 Mo adapter + optimizer) — règle Vadim, actée le 2026-09-04 après une
+  perte de run sur `/tmp` plein. `/tmp` (volatil, purgé à chaque recréation du pod) ne reste
+  acceptable que pour du full-FT (12 Go/ckpt), et il faut le dire explicitement.
 - Modèle de base : `/tmp/models/` (retélécharger via `setup/ensure_qwen_tmp.sh`).
 - À chaque nouveau best train, l'adapter est remplacé (swap atomique `.tmp` → dir) ;
   `.besttrain_info` trace step/epoch/mean/lr/beta.
 - **Toujours activer `--lr-adaptive-save-optimizer`** sur les runs adaptatifs LoRA :
-  l'état Adam (moments fp32) est sauvé avec le best et **restauré à chaque coupe de LR**
-  (poids + moments cohérents, reprise exacte après coupure infra). Sans ce flag, les
-  moments sont remis à zéro au restore (exp22.1).
+ l'état Adam (moments fp32) est sauvé avec le best et **restauré à chaque coupe de LR**
+ (poids + moments cohérents, reprise exacte après coupure infra). Sans ce flag, les
+ moments sont remis à zéro au restore (exp22.1).
+- **TOUS les runs (full-FT ET LoRA) : activer `--save-best-optimizer`** (règle étendue
+ le 2026-08-20 après la perte de l'optimizer d'exp25 dans la purge /tmp — en LoRA r8
+ l'optimizer ne pèse que quelques dizaines de Mo, aucune raison de s'en priver) :
+ `optimizer.pt` (~6.2 Go, Adam 8-bit) sauvé avec chaque best test dans
+ `saves/trl_grpo/<run>_best` → reprise à moments cohérents après purge /tmp.
+ Compter **12 Go par best** (modèle 5.8 + optim 6.2) et un pic ~17.8 Go pendant le
+ swap — vérifier l'espace libre du home AVANT de lancer.
 
 **2. Stabilisation LR + beta KL — trois modes (exclusifs)**
 

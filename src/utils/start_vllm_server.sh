@@ -39,7 +39,8 @@ echo $! > /tmp/vllm_server.pid
 echo "[vllm] PID : $! (sauvegardé dans /tmp/vllm_server.pid)"
 echo "[vllm] Attente démarrage..."
 
-for i in $(seq 1 90); do    # 3 min — le démarrage vLLM v2 (compilation JIT + CUDA graphs) dépasse souvent 60 s
+WAIT_ITERS="${WAIT_ITERS:-90}"  # ×2 s ; monter (ex. WAIT_ITERS=240) pour les gros modèles (7B)
+for i in $(seq 1 "$WAIT_ITERS"); do    # défaut 3 min — le démarrage vLLM v2 (compilation JIT + CUDA graphs) dépasse souvent 60 s
     sleep 2
     if curl -s http://localhost:$PORT/health > /dev/null 2>&1; then
         echo "[vllm] Serveur prêt sur http://localhost:$PORT"

@@ -1,0 +1,47 @@
+# exp31.1 — PHASE 1 ablation d'ancre : ancre FIXE + β0.0001 — redéfinie le 2026-08-24
+# (remplace exp31 originale = mobile+β0.001, arrêtée à 53 stable ; job 42 → skipped/)
+run_name: exp31.1_r8_fixedanchor_b00001
+famille: 13_moving_anchor
+statut: arrêté 2026-08-24 16:47 (divergence KL — verdict acquis, inutile de continuer)
+
+hypothese: >
+  Compléter le carré ancre × β de la phase 1 : l'ancre mobile est-elle NÉCESSAIRE,
+  ou un β quasi nul (100× sous exp30) avec ancre fixe (Qwen nu du début à la fin)
+  suffit-il ? La lignée dit déjà : fixe+β0.001 = pic 35 puis collapse (exp24),
+  fixe+β0.01 = pic 39 puis collapse ep ~11 (exp30). Ici on relâche presque toute
+  la contrainte KL SANS ré-ancrage.
+
+config:
+  base_model: /tmp/models/Qwen2.5-3B-Instruct
+  lora_r: 8
+  lora_alpha: 32
+  learning_rate: 3e-6
+  beta_kl: 0.0001        # SEUL delta vs exp30 (0.01) ; pas de --moving-anchor-*
+  batch: 64 traj/update on-policy (grad_accum 64)
+  num_generations: 8
+  entropy_coef: 0.001
+  epochs: 200 (arrêt manuel prévu)
+  max_rounds: 30 constant ('30:0')
+  eval: 47 steps / 100 items ; --save-best-optimizer
+  job: runs/queue/done/42b_exp31.1_r8_fixedanchor_b00001.sh
+
+resultats:
+  statut: arrêté à l'epoch ~9.2 (step ~423/9200), run du 24/08 09:47 → 16:47
+  evals_pass1: [13, 16, 22, 24, 32, 34, 25, 25, 26]   # steps 47..423
+  best: 34/100 @ step 282 (ep ~6) — adapter + optimizer (115 Mo) dans
+    saves/trl_grpo/exp31.1_r8_fixedanchor_b00001_best
+  dernier_ckpt: saves/trl_grpo/exp31.1_r8_fixedanchor_b00001_ckpt376 (copié de
+    /tmp avant kill — ATTENTION, déjà en divergence : kl ~1572 au step 376)
+  divergence: >
+    KL saine jusqu'à l'ep ~6 (0.003 → 0.213) puis runaway : 906 (ep 7), 1572
+    (ep 8), 2.25e14 (ep 9.2). Entropie 1.3 → 0.02 (politique quasi déterministe),
+    completions moyennes 8k tokens (génération détruite), 20 erreurs format/ep
+    à l'éval step 423, loss 1e11. Même signature que le collapse β0.001 d'exp24,
+    en plus violent (β 10× plus faible).
+  lecture: >
+    VERDICT PHASE 1 : aucune valeur de β ne sauve l'ancre fixe (0.01 plafonne
+    puis décroche, 0.001 et 0.0001 divergent) ; l'ancre mobile est nécessaire
+    (exp31 : 53 stable à β0.001 ; exp25/25.2 : 65-73 à β0.01). La KL vers une
+    référence proche agit comme stabilisateur local — vers Qwen nu elle est
+    soit trop faible pour retenir la divergence, soit trop forte pour apprendre.
+    → figure 1 du rapport (carré ancre × β) ; phase 2 lancée le 24/08.

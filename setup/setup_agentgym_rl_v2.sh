@@ -26,13 +26,23 @@ echo "[setup-v2] Création du venv : $ENV_DIR"
 PIP="$ENV_DIR/bin/pip"
 "$PIP" install --upgrade pip wheel ninja -q --cache-dir "$CACHE"
 
-echo "[setup-v2] Stack principale (vLLM récent + TRL récent)..."
-"$PIP" install "vllm>=0.25" "trl>=1.9.0" --cache-dir "$CACHE"
+echo "[setup-v2] Stack principale (vLLM épinglé + TRL récent)..."
+# vLLM ÉPINGLÉ (leçon 2026-08-11) : vllm>=0.25 non épinglé a tiré vllm 0.27 / torch 2.13,
+# incompatible ABI avec le wheel flash-attn en cache (undefined symbol au premier import)
+# → cascade d'échecs dans la file d'expériences. 0.26.0 = torch 2.11+cu130, la stack
+# validée par exp23.3/23.4. Monter de version = recompiler flash-attn en connaissance.
+"$PIP" install "vllm==0.26.0" "trl>=1.9.0" --cache-dir "$CACHE"
 
 echo "[setup-v2] flash-attention (wheel précompilé si présent, sinon compilation ~50 min)..."
 FA_WHEEL=$(ls "$REPO_ROOT"/saves/wheels/flash_attn-*.whl 2>/dev/null | head -1 || true)
 if [ -n "$FA_WHEEL" ]; then
     "$PIP" install "$FA_WHEEL" --cache-dir "$CACHE"
+    # Le nom du wheel n'encode PAS l'ABI torch : tester l'import, recompiler si besoin.
+    if ! "$ENV_DIR/bin/python" -c "import flash_attn" 2>/dev/null; then
+        echo "[setup-v2] wheel en cache incompatible avec ce torch — recompilation (~50 min)"
+        "$PIP" uninstall -y flash-attn
+        "$PIP" install flash-attn --no-build-isolation --cache-dir "$CACHE"
+    fi
 else
     "$PIP" install flash-attn --no-build-isolation --cache-dir "$CACHE"
 fi
