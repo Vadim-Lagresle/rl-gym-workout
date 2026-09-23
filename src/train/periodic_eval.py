@@ -1,4 +1,13 @@
-"""Éval Pass@1 sur le test set PENDANT l'entraînement + sauvegarde du best.
+"""Test evaluation during training, and saving of the best model.
+
+In plain words: every N updates, the current model plays the 100 test tasks with
+exactly the protocol of the offline evaluation (30 turns, temperature 1.0), and the
+pass@1 is logged with its breakdown by depth and by error class. When the score beats
+the best so far, the model (the adapter, and optionally its optimizer) is saved to
+saves/trl_grpo/<run>_best. These test episodes never reach the loss: the test set is
+never learned.
+
+Notes (FR) — Éval Pass@1 sur le test set PENDANT l'entraînement + sauvegarde du best.
 
 `run_test_eval` réplique le protocole d'eval offline (src/eval/eval_textcraft.py) —
 même dataset, même bootstrap de messages, cap 30 tours, temperature 1.0 — pour que
@@ -26,7 +35,7 @@ from agentenv.envs import TextCraftEnvClient
 
 # Source UNIQUE de la taxonomie d'erreurs : classify_error d'analyze_eval
 # (src/analysis) plutôt qu'une copie des patterns (éviter toute dérive).
-from src.analysis.analyze_eval import classify_error, ERROR_PATTERNS
+from src.eval.error_taxonomy import ERROR_PATTERNS, classify_error
 # Bootstrap de messages partagé avec l'éval offline (règles + ack + obs, few-shot inclus).
 from src.eval.textcraft_common import build_initial_messages
 from src.train import vllm_engine
@@ -34,7 +43,7 @@ from src.train.data import DEFAULT_SYSTEM_PROMPT, ENV_SERVER_URL, REPO_ROOT, ite
 
 EVAL_DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 EVAL_DEPTH_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test_with_depth.json"
-EVAL_MAX_ROUNDS = 30  # protocole d'éval, distinct de schedules.MAX_SIM_ROUNDS=20 (training)
+EVAL_MAX_ROUNDS = 30  # protocole d'éval, distinct de horizon_schedules.MAX_SIM_ROUNDS=20 (training)
 
 
 def run_test_eval(llm: Any, tokenizer: Any, max_items: int = 0,

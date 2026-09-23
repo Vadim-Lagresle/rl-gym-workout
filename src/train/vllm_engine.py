@@ -1,4 +1,13 @@
-"""Accès au moteur vLLM géré par TRL (mode colocate) + utilitaires de sauvegarde.
+"""Access to the vLLM generation engine that TRL runs inside the training process.
+
+In plain words: TRL builds a vLLM engine next to the model being trained and copies the
+new weights into it after every update. This file lets the episode loop and the
+periodic evaluation use that engine: generate one turn for many episodes at once, force
+a weight copy before an evaluation, and save a complete model (adapter merged) that
+vLLM can serve later. The older home-made engine of the first months was removed in
+July 2026.
+
+Notes (FR) — Accès au moteur vLLM géré par TRL (mode colocate) + utilitaires de sauvegarde.
 
 Historique (migration 2026-07-22) : jusqu'à TRL 1.4.0 / vLLM 0.9.1 (contrainte
 glibc 2.28 de l'ancienne VM), ce module gérait SON PROPRE moteur vLLM in-process :

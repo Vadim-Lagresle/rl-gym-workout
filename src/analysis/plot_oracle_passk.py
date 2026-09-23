@@ -1,5 +1,9 @@
-"""
-Génère les 3 figures oracle pass@k superposées pour Qwen2.5-3B baseline,
+"""Figures of pass@k curves from an oracle evaluation.
+
+In plain words: reads the passes written by eval/eval_oracle.py and draws pass@k as a
+function of k, overall and by depth, optionally overlaying several models.
+
+Notes (FR) — Génère les 3 figures oracle pass@k superposées pour Qwen2.5-3B baseline,
 meilleur checkpoint RL (exp7.3) et Qwen3.5-4B.
 
 Usage :

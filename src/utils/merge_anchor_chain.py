@@ -1,6 +1,13 @@
-"""Reconstruit un modèle complet depuis une chaîne d'ancres mobiles (exp25).
+"""Rebuilds a complete model from a moving-anchor run.
 
-Avec --moving-anchor-every-epochs (schedules.MovingAnchorCallback), le modèle
+In plain words: with the merge-and-restart anchor, the model at any time is the base
+model plus every adapter merged at each re-anchoring, plus the current adapter. This
+script applies that chain (saved in saves/trl_grpo/<run>_anchors/) to get a single
+model, for evaluation or to resume a run after the machine was reset.
+
+Notes (FR) — Reconstruit un modèle complet depuis une chaîne d'ancres mobiles (exp25).
+
+Avec --moving-anchor-every-epochs (kl_anchor.MovingAnchorCallback), le modèle
 final n'est PAS « base + adapter » : à chaque ré-ancrage, l'adapter du cycle a
 été fusionné dans la base puis réinitialisé. Le modèle à un instant t est donc :
 

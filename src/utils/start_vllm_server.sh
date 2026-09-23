@@ -1,4 +1,7 @@
 #!/bin/bash
+# In plain words: starts an OpenAI-compatible vLLM server on port 8001 for a given
+# checkpoint, used by the evaluation's vllm backend.
+#
 # Lance un serveur vLLM compatible OpenAI sur le port 8001.
 # Usage : bash src/utils/start_vllm_server.sh <chemin_checkpoint> [max_model_len]
 # Exemple : bash src/utils/start_vllm_server.sh models/Qwen2.5-3B-Instruct

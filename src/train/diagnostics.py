@@ -1,4 +1,9 @@
-"""Télémétrie mémoire GPU pendant l'entraînement."""
+"""GPU-memory telemetry during training.
+
+In plain words: logs how much GPU memory is allocated and reserved at each update,
+which helped size the vLLM share and the batch on the single B200.
+
+Notes (FR) — Télémétrie mémoire GPU pendant l'entraînement."""
 
 from __future__ import annotations
 

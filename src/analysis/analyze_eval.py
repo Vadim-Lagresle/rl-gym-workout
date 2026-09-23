@@ -1,5 +1,11 @@
-"""
-Analyse approfondie des logs d'évaluation TextCraft.
+"""Offline analysis of TextCraft evaluation logs: per episode, per depth, per error.
+
+In plain words: point it at the episode logs written by an evaluation and it prints
+a table per episode (success, turns, errors), a summary per depth, a histogram of
+error classes (see eval/error_taxonomy.py), and whether the model recovers after a
+mistake. Optionally counts tokens and exports a CSV.
+
+Notes (FR) — analyse approfondie des logs d'évaluation TextCraft.
 
 Produit :
   1. Tableau détaillé par épisode
@@ -29,57 +35,16 @@ import json
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 
 # ── Constantes ────────────────────────────────────────────────────────────────
 
 MAX_CONTEXT = 32_768  # Qwen2.5-3B-Instruct
 
-# Patterns de classification des observations d'erreur
-# Ordre IMPORTANT : classify_error garde le PREMIER pattern qui matche.
-# Les patterns spécifiques doivent précéder les résiduels (other_error, generic_fail).
-ERROR_PATTERNS = [
-    ("format_error",   re.compile(r"could not execute", re.I)),          # action mal formée, parseur rejette
-    ("recipe_wrong",   re.compile(r"could not find a valid recipe", re.I)),
-    ("missing_items",  re.compile(r"could not find enough items", re.I)),  # quantité insuffisante
-    ("item_not_found", re.compile(r"could not find", re.I)),             # "Could not find <objet>" : absent inventaire / mal nommé
-    ("wrong_format",   re.compile(r"wrong item format", re.I)),
-    ("multi_action",   re.compile(r"only one .action. is allowed", re.I)),  # plusieurs "Action:" dans une réponse
-    ("other_error",    re.compile(r"error:", re.I)),                     # résiduel "error:"
-    ("generic_fail",   re.compile(r"could not", re.I)),                  # résiduel "could not …"
-]
-
-# Description lisible de chaque type d'erreur (affichée dans chaque analyse).
-ERROR_DESCRIPTIONS = {
-    "format_error":   "« could not execute » — action mal formée, le parseur de l'env la rejette (syntaxe).",
-    "recipe_wrong":   "« could not find a valid recipe » — aucune recette valide pour la cible.",
-    "missing_items":  "« could not find enough items » — prérequis en quantité insuffisante (erreur de planif).",
-    "item_not_found": "« could not find <objet> » — objet absent de l'inventaire / mal nommé.",
-    "wrong_format":   "« wrong item format » — nom d'objet mal écrit.",
-    "multi_action":   "« only one 'Action' is allowed » — plusieurs actions émises en une réponse (protocole).",
-    "other_error":    "résiduel : contient « error: » sans matcher un cas ci-dessus.",
-    "generic_fail":   "résiduel : contient « could not » sans matcher un cas ci-dessus.",
-}
-
-ACTION_RE = re.compile(r"Action:\s*(.+?)(?:\n|$)", re.DOTALL)
-
-
-# ── Utilitaires ───────────────────────────────────────────────────────────────
-
-def classify_error(obs: str) -> str | None:
-    """Retourne la catégorie d'erreur d'une observation, ou None si succès/neutre."""
-    for label, pat in ERROR_PATTERNS:
-        if pat.search(obs):
-            return label
-    return None
-
-
-def extract_action(text: str) -> str:
-    """Extrait la première ligne d'action d'un message assistant."""
-    m = ACTION_RE.search(text)
-    if not m:
-        return ""
-    return " ".join(m.group(1).strip().split())
+from src.eval.error_taxonomy import ACTION_RE, ERROR_DESCRIPTIONS, ERROR_PATTERNS, classify_error, extract_action  # noqa: E402,F401
 
 
 def count_tokens_for_messages(tokenizer, messages: list[dict]) -> int:

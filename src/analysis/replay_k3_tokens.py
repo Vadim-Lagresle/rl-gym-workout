@@ -1,4 +1,11 @@
-"""Rejeu hors entraînement de l'estimateur KL k3, token par token (étape 2, 15/09/2026).
+"""Token-by-token replay of the KL estimator on a saved checkpoint.
+
+In plain words: replays training episodes with a checkpoint and its exact KL reference,
+recomputes for every action token the log-probability under the policy and under the
+reference, and reports which tokens carry the KL. This is how the report found that the
+collapse at G=16 came from the unbounded k3 estimator on a few tokens (Appendix F.7).
+
+Notes (FR) — Rejeu hors entraînement de l'estimateur KL k3, token par token (étape 2, 15/09/2026).
 
 Question : quand la KL loguée par TRL explose (exp36/40/34), est-ce une dérive
 uniforme de la politique ou une poignée de tokens de queue qui portent tout ?
@@ -40,7 +47,7 @@ sys.path.insert(0, str(REPO_ROOT))
 import torch  # noqa: E402
 from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
 
-from src.train import data, rollout, schedules  # noqa: E402
+from src.train import data, horizon_schedules, rollout  # noqa: E402
 
 LOG_1E4 = math.log(1e-4)
 
@@ -139,7 +146,7 @@ def main() -> None:
     args = parse_args()
     import os
     os.environ.setdefault("PATH", "")
-    schedules.MAX_SIM_ROUNDS = args.max_rounds            # équivalent de --max-rounds-schedule '30:0'
+    horizon_schedules.MAX_SIM_ROUNDS = args.max_rounds            # équivalent de --max-rounds-schedule '30:0'
     data.check_server()
 
     tokenizer = AutoTokenizer.from_pretrained(args.policy)

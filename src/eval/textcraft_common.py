@@ -1,4 +1,12 @@
-"""Tronc commun des évaluations TextCraft.
+"""What all evaluations share: the episode loop, the log format, the pass@k estimator.
+
+In plain words: run_episode plays one test episode with any generation function (vLLM,
+HuggingFace, an API); the rest is plumbing shared by the evaluation scripts and the
+periodic evaluation: loading the test set and its depths, reading and writing episode
+logs, resuming an interrupted evaluation, loading few-shot examples, and the pass@k
+estimator.
+
+Notes (FR) — Tronc commun des évaluations TextCraft.
 
 Contient l'unique implémentation de la boucle d'épisode multi-tour d'ÉVALUATION
 (`run_episode`, paramétrée par une fonction de génération — serveur vLLM, HF,
@@ -30,7 +38,7 @@ DATASET_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test.json"
 DEPTH_MAP_PATH = REPO_ROOT / "data" / "eval" / "textcraft_test_with_depth.json"
 RUNS_DIR = REPO_ROOT / "runs"
 ENV_SERVER_URL = "http://127.0.0.1:36005"
-MAX_ROUNDS = 30  # protocole d'éval (le training utilise 20, cf. src/train/schedules.py)
+MAX_ROUNDS = 30  # protocole d'éval (le training utilise 20, cf. src/train/horizon_schedules.py)
 DEFAULT_SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
 # Signature d'un backend de génération : messages (format chat OpenAI) → texte.

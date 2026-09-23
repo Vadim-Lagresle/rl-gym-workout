@@ -1,4 +1,10 @@
-"""Teste si la vLLM installée peut servir un modèle donné (sans télécharger les poids).
+"""Tells whether the installed vLLM can serve a given model.
+
+In plain words: reads the model's architecture from its config and checks it against
+vLLM's registry, so that the evaluation can fall back to HuggingFace generation when
+vLLM cannot serve it.
+
+Notes (FR) — Teste si la vLLM installée peut servir un modèle donné (sans télécharger les poids).
 
 Lit les `architectures` du config.json du modèle et les compare au registre des
 architectures supportées par vLLM. Sert au lanceur d'éval pour choisir entre la

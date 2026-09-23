@@ -1,4 +1,12 @@
-"""Borne haute optionnelle de l'estimateur KL k3 de TRL (patch idempotent, 15/09/2026).
+"""Adds an optional bound on TRL's per-token KL estimator (as in the reference paper's code).
+
+In plain words: the paper's verl code bounds the k3 estimator to [-10, 10] per token;
+TRL does not, and a single token can then dominate an update and destroy the policy.
+This idempotent patch inserts the bound into the installed TRL, active only when the
+environment variable TRL_KL_CLAMP is set (train_grpo.py sets it from --kl-clamp). Run
+once after building the environment; setup_agentgym_rl_v2.sh does it.
+
+Notes (FR) — Borne haute optionnelle de l'estimateur KL k3 de TRL (patch idempotent, 15/09/2026).
 
 Pourquoi : verl (stack du papier) borne k3 = exp(ρ) − ρ − 1 à [−10, 10] par token
 (external/AgentGym-RL/verl/agent_trainer/ppo/core_algos.py:381) ; TRL ne borne pas

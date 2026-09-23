@@ -13,7 +13,7 @@ export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH"
 RUN=exp48_depthbal_uniform
 bash setup/ensure_qwen_tmp.sh || { echo "[job61] téléchargement Qwen3B ÉCHOUÉ"; exit 1; }
 python setup/patch_trl_kl_clamp.py || { echo "[job61] patch k3 TRL ÉCHOUÉ — run ANNULÉ"; exit 1; }
-python src/train/schedules.py > logs/selftest_schedules_job61.log 2>&1 \
+python -m src.tests.test_schedules > logs/selftest_schedules_job61.log 2>&1 \
   || { echo "[job61] selftest schedules ÉCHOUÉ — run ANNULÉ"; exit 1; }
 [ -f data/train/textcraft_train_plus_reservoir.json ] && [ -f data/train/textcraft_train_plus_reservoir_with_depth.json ] \
   || { echo "[job61] fichiers de train étendus absents — run ANNULÉ"; exit 1; }

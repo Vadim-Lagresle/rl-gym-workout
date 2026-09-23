@@ -1,4 +1,11 @@
-"""Expérience "oracle" — pass@k sur TextCraft pour estimer la marge exploitable par le RL.
+"""pass@k evaluation: how many tasks the model can solve at least once in k tries.
+
+In plain words: draws N independent episodes per test task and computes pass@k for k =
+1..N with the unbiased estimator of Chen et al. (2021), overall and by depth. The gap
+between pass@1 and pass@k is the headroom that RL can turn into reliability; a task at
+zero success in k tries gives GRPO no gradient at all. Passes are resumable.
+
+Notes (FR) — Expérience "oracle" — pass@k sur TextCraft pour estimer la marge exploitable par le RL.
 
 Idée (discussion 2026-06-16, "trick best-of-K") : pour chaque item de test on tire N
 trajectoires indépendantes (température 1.0) et on regarde si AU MOINS UNE réussit. Le

@@ -1,8 +1,15 @@
-"""Génération chat à 2 backends (serveur vLLM ou HuggingFace in-process).
+"""Chat generation with one interface over two backends (vLLM server or HuggingFace).
+
+In plain words: ChatGenerator takes a list of messages and returns the model's answer,
+whichever backend runs underneath; 'auto' picks vLLM when the installed vLLM can serve
+the model's architecture, and HuggingFace otherwise. Used by eval_textcraft.py and
+eval_oracle.py.
+
+Notes (FR) — Génération chat à 2 backends (serveur vLLM ou HuggingFace in-process).
 
 `ChatGenerator` est LE point d'entrée : il résout le backend (`auto` = vllm si
 l'archi est servable par la vLLM installée, sinon HF — indispensable pour les
-archis récentes type Qwen3.5 bloquées par vLLM 0.9.1/glibc 2.28) puis expose
+archis que la vLLM installée ne sait pas servir) puis expose
 `.generate(messages, max_tokens, temperature)`. Utilisé par eval_textcraft.py,
 eval_oracle.py et le pipeline exp16 (single_turn/).
 """

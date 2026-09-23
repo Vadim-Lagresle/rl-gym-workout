@@ -1,4 +1,7 @@
 #!/bin/bash
+# In plain words: called at the end of every queue job: appends the best score and the
+# evaluation trajectory of the run to docs/RESULTS.md.
+#
 # append_results.sh <run_name> <titre court> — appelé en FIN de chaque job de la
 # file : ajoute à docs/RESULTS.md le best et la trajectoire d'éval du run
 # (les interprétations sont complétées à la relecture, voir aussi runs/INDEX.md).

@@ -1,5 +1,11 @@
-"""
-Génère les mappings {item_id: depth} des datasets TextCraft :
+"""Labels every TextCraft task with its depth.
+
+In plain words: the depth of a recipe is the number of crafting levels between raw
+materials and the goal (1 to 4). This script computes it with the environment's own
+crafting tree and writes the {task: depth} files used for stratified results and depth
+curricula. Needs the TextCraft environment package (its own virtualenv).
+
+Notes (FR) — Génère les mappings {item_id: depth} des datasets TextCraft :
     data/train/textcraft_train_with_depth.json   (374 items)
     data/eval/textcraft_test_with_depth.json     (100 items)
 

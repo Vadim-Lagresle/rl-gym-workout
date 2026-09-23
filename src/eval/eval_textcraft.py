@@ -1,4 +1,11 @@
-"""Évaluation multi-tour TextCraft — LE point d'entrée (2 backends).
+"""Offline evaluation of a model on the TextCraft test set: the evaluation entry point.
+
+In plain words: plays the 100 test tasks with a given checkpoint and reports pass@1,
+overall and by depth, with one JSON log per episode. Two backends: a vLLM server (fast;
+start it with src/utils/start_vllm_server.sh) or plain HuggingFace generation (slow but
+works for any model). Commands are in the README.
+
+Notes (FR) — Évaluation multi-tour TextCraft — LE point d'entrée (2 backends).
 
 Fusion d'eval_vllm.py et eval_fullft.py (refacto 2026-07-16) : la boucle
 d'épisode vit dans textcraft_common.run_episode, la génération dans

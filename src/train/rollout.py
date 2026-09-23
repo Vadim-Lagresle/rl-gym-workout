@@ -1,4 +1,14 @@
-"""Boucle d'environnement TextCraft unique + contrat rollout_func de TRL.
+"""The episode loop between the model and TextCraft, and the reward.
+
+In plain words: this is the only place where training episodes are played. For a
+batch of tasks, the model writes an action, the TextCraft server answers with an
+observation, and so on until the item is crafted or the turn cap is reached. Each
+episode then becomes one training sequence for TRL, in which only the tokens the
+model wrote carry gradient; the environment's text stays in the sequence (so the
+model sees the exact context it acted in) but is masked out. The reward is 1 if the
+goal was crafted, 0 otherwise.
+
+Notes (FR) — boucle d'environnement TextCraft unique + contrat rollout_func de TRL.
 
 C'est LE seul endroit du projet où l'on joue des épisodes d'entraînement :
 `collect_episodes` génère (vLLM in-process ou HF) → env.step → observe → repeat,
@@ -6,7 +16,7 @@ et retourne une structure PAR TOUR (`Episode` / `Turn`). Les deux consommateurs 
 
   - GRPO pur   : `grpo_rollout_func` = collect_episodes + `episodes_to_trl_batch`
                  (mise à plat du flux entrelacé actions/observations/marqueurs) ;
-  - SNIS       : `snis.make_rollout_func` recombine les tours entre épisodes
+  - (archivé) SNIS : archive/train/snis.py recombinait les tours entre épisodes
                  avant la même mise à plat (via `extend_stream`).
 
 Conventions de masquage (contrat TRL "env_mask", cf. verl RolloutHandler,
@@ -31,7 +41,7 @@ from agentenv.envs import TextCraftEnvClient
 
 from src.train import vllm_engine
 from src.train.data import ENV_SERVER_URL, ITEM_TAG_RE
-from src.train.schedules import current_max_completion, current_max_rounds, log_schedule_state
+from src.train.horizon_schedules import current_max_completion, current_max_rounds, log_schedule_state
 
 
 def count_actions(text: str) -> int:
@@ -177,7 +187,7 @@ def collect_episodes(prompts: list[list[dict[str, str]]], trainer: Any) -> list[
 
 
 # ---------------------------------------------------------------------------
-# Mise à plat tours → flux TRL (partagée avec snis._append_turn)
+# Mise à plat tours → flux TRL
 # ---------------------------------------------------------------------------
 
 def extend_stream(stream_ids: list[int], stream_lps: list[float], stream_mask: list[int],
@@ -247,13 +257,6 @@ def episodes_to_trl_batch(episodes: list[Episode], tokenizer: Any) -> dict[str, 
 def grpo_rollout_func(prompts: list[list[dict[str, str]]], trainer: Any) -> dict[str, Any]:
     """rollout_func GRPO pur : collecte interactive + mise à plat TRL."""
     episodes = collect_episodes(prompts, trainer)
-    # Autocurriculum (exp34/magellan.py) : pousse (ligne dataset, succès) vers le
-    # callback — _goal_recorder et _item_idx_to_row sont posés par train_grpo.py.
-    recorder = getattr(trainer, "_goal_recorder", None)
-    if recorder is not None:
-        row_of = trainer._item_idx_to_row
-        recorder([(row_of[ep.item_idx], ep.reward) for ep in episodes
-                  if ep.item_idx in row_of])
     batch = episodes_to_trl_batch(episodes, trainer.processing_class)
     n_turns = batch.pop("_n_turns")
     print(

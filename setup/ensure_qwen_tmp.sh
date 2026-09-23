@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# In plain words: downloads Qwen2.5-3B-Instruct to /tmp/models if it is missing (/tmp
+# is wiped when the machine is reset). Safe to call before every job.
+#
 # S'assure que Qwen2.5-3B-Instruct est présent sur /tmp (volatil, purgé parfois).
 # Politique disque 2026-07-29 : le home (35 Go) ne stocke QUE les best adapters
 # (+ optimizers) ; les poids de base sont retéléchargés ici à la demande.

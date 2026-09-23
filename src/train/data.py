@@ -1,4 +1,13 @@
-"""Dataset d'entraînement et prompts TextCraft.
+"""The training tasks and the prompts the model starts each episode with.
+
+In plain words: loads the list of training recipes (data/train/textcraft_train.json by
+default, or another file with --train-file), optionally keeps only some depths, and
+builds for each task the chat prompt: the game rules sent by the TextCraft server,
+optional solved examples (few-shot), and a hidden marker that the episode loop replaces
+by the actual task. Also holds the shared paths (repository root, base model, server
+address).
+
+Notes (FR) — Dataset d'entraînement et prompts TextCraft.
 
 Charge data/train/textcraft_train.json, filtre optionnellement par depth
 (curriculum), et construit les prompts chat avec le marqueur <ITEM_IDX:n>

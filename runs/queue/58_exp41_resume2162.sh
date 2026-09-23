@@ -15,7 +15,7 @@ BASE=/tmp/models/exp41_anchor5_base
 [ -f "$CKPT/optimizer.pt" ] && [ -f "$CKPT/adapter_model.safetensors" ] && [ -f "$ANCHORS/chain.jsonl" ] \
   || { echo "[job53b] checkpoint-2162 ou chaîne d'ancres incomplets — run ANNULÉ"; exit 1; }
 bash setup/ensure_qwen_tmp.sh || { echo "[job53b] téléchargement Qwen3B ÉCHOUÉ"; exit 1; }
-python src/train/schedules.py > logs/selftest_schedules_job53b.log 2>&1 \
+python -m src.tests.test_schedules > logs/selftest_schedules_job53b.log 2>&1 \
   || { echo "[job53b] selftest schedules ÉCHOUÉ — run ANNULÉ"; exit 1; }
 if [ ! -f "$BASE/model.safetensors" ] && [ ! -f "$BASE/model.safetensors.index.json" ]; then
   echo "[job53b] reconstruction de la base ancrée (Qwen3B ⊕ cycles 1-5, steps ≤ 2162) → $BASE"

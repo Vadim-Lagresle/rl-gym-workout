@@ -12,7 +12,7 @@ cd "$(dirname "$0")/../.."
 export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH"
 RUN=exp47_fixedanchor_lr1e-6
 bash setup/ensure_qwen_tmp.sh || { echo "[job60] téléchargement Qwen3B ÉCHOUÉ"; exit 1; }
-python src/train/schedules.py > logs/selftest_schedules_job60.log 2>&1 \
+python -m src.tests.test_schedules > logs/selftest_schedules_job60.log 2>&1 \
   || { echo "[job60] selftest schedules ÉCHOUÉ — run ANNULÉ"; exit 1; }
 echo "=== [job60] $(date '+%F %T') — exp47 = exp30 (référence FIXE, G=8) avec LR 1e-6, 30 epochs ===" >> "logs/$RUN.log"
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train/train_grpo.py \

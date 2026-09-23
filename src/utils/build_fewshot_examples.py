@@ -1,4 +1,11 @@
-"""Construit les exemples few-shot pour l'éval de prompting (exp18).
+"""Builds the solved examples used in few-shot prompts.
+
+In plain words: takes the 70 TextCraft recipes that are in neither the training nor the
+test set, derives their optimal solution from the crafting tree, checks it in the
+environment, and writes them as ready-to-insert dialogue turns. No test recipe is ever
+shown to the model.
+
+Notes (FR) — Construit les exemples few-shot pour l'éval de prompting (exp18).
 
 Source des exemples : les items de l'univers TextCraft ABSENTS du train ET du
 test (70 items : 18 depth-2, 45 depth-3, 7 depth-4 — aucun depth-1 disponible),

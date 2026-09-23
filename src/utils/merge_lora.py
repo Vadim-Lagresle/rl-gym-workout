@@ -1,4 +1,9 @@
-"""Fusionne un adapter LoRA dans son modèle de base → modèle HF complet.
+"""Merges a LoRA adapter into its base model to get a complete model.
+
+In plain words: the merged model is a standard HuggingFace checkpoint that vLLM can
+serve for evaluation, or that can start a new run with --model-path.
+
+Notes (FR) — Fusionne un adapter LoRA dans son modèle de base → modèle HF complet.
 
 Version paramétrée des scripts jetables merge_exp10p{5,7,8}.py (archivés dans
 archive/scripts/merge_lora_originaux/) qui ont produit la lignée warm-start

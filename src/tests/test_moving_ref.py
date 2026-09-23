@@ -1,4 +1,12 @@
-"""Test à sec (CPU, modèle Qwen2 jouet) de MovingRefAdapterCallback (exp46, ancre mobile par
+"""CPU self-test of the frozen-copy KL reference (moving-anchor mode 'ref').
+
+In plain words: checks on a tiny model that the reference adapter is added without
+changing what is trained, equals the base model at the start, becomes an exact copy of
+the policy at each re-anchoring (KL back to zero), is never sent to the generation
+engine, and is reloaded correctly when a run resumes. Run: python -m
+src.tests.test_moving_ref
+
+Notes (FR) — Test à sec (CPU, modèle Qwen2 jouet) de MovingRefAdapterCallback (exp46, ancre mobile par
 adaptateur `ref` figé). Vérifie les invariants dont dépend la sémantique KL de TRL :
   1. attach : 'ref' ajouté, 'default' reste actif, 'ref' hors gradient, mêmes paramètres entraînables ;
   2. au départ logits(ref) == logits(base) (B=0) ; use_adapter restaure actif + requires_grad ;
@@ -8,7 +16,7 @@ adaptateur `ref` figé). Vérifie les invariants dont dépend la sémantique KL 
   5. merge_adapter/unmerge (sync vLLM de TRL) ne touchent que l'adaptateur actif ;
   6. reprise : initial_cycle=k recharge cycle<k> dans 'ref' ;
   7. save_pretrained complet (checkpoint) écrit 'ref' en sous-dossier.
-Lancer : CUDA_VISIBLE_DEVICES= /tmp/envs/agentgym-rl-v2/bin/python src/train/selftest_moving_ref.py
+Lancer : CUDA_VISIBLE_DEVICES= /tmp/envs/agentgym-rl-v2/bin/python python -m src.tests.test_moving_ref
 """
 from __future__ import annotations
 
@@ -20,7 +28,7 @@ from types import SimpleNamespace
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from src.train.schedules import MovingRefAdapterCallback  # noqa: E402
+from src.train.kl_anchor import MovingRefAdapterCallback  # noqa: E402
 
 torch.manual_seed(0)
 from peft import LoraConfig, get_peft_model  # noqa: E402

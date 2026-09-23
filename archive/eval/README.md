@@ -15,3 +15,8 @@
 
 NB : `eval_vllm.py` n'est pas ici — il a été **renommé** `src/eval/eval_textcraft.py`
 (git mv, historique conservé) puis réécrit autour de `textcraft_common` + `llm_chat`.
+
+## Ajouts du 2026-09-23
+
+- `api/` : évaluations de Gemini et d'un endpoint OpenAI-compatible (bornes SOTA du rapport, Gemini 3.5 Flash 99 %). Terminé ; nécessite des clés d'API.
+- `single_turn/` : pipeline exp16 (collecte puis rejeu de plans single-turn). Terminé, cf. rapport annexe D.

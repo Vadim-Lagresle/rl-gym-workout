@@ -12,9 +12,9 @@ cd "$(dirname "$0")/../.."
 export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH"
 RUN=exp46_movingref_g8
 bash setup/ensure_qwen_tmp.sh || { echo "[job59] téléchargement Qwen3B ÉCHOUÉ"; exit 1; }
-python src/train/schedules.py > logs/selftest_schedules_job59.log 2>&1 \
+python -m src.tests.test_schedules > logs/selftest_schedules_job59.log 2>&1 \
   || { echo "[job59] selftest schedules ÉCHOUÉ — run ANNULÉ"; exit 1; }
-CUDA_VISIBLE_DEVICES= python src/train/selftest_moving_ref.py > logs/selftest_moving_ref_job59.log 2>&1 \
+CUDA_VISIBLE_DEVICES= python -m src.tests.test_moving_ref > logs/selftest_moving_ref_job59.log 2>&1 \
   || { echo "[job59] selftest moving-ref (CPU) ÉCHOUÉ — run ANNULÉ (logs/selftest_moving_ref_job59.log)"; exit 1; }
 rm -rf saves/trl_grpo/smoke_movingref_anchors
 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python src/train/train_grpo.py \

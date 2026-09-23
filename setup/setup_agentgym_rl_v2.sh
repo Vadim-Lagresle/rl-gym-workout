@@ -1,4 +1,8 @@
 #!/bin/bash
+# In plain words: builds the training environment in /tmp/envs/agentgym-rl-v2 (recent
+# TRL and vLLM, flash-attention) in about ten minutes, and applies the KL-bound patch
+# to TRL.
+#
 # Construit l'environnement d'entraînement v2 : vLLM récent + TRL récent + flash-attention.
 # (Migration 2026-07-22 — possible depuis le passage de la VM à CentOS Stream 10 / glibc 2.39.)
 #
