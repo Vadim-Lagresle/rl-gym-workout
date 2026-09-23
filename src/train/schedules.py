@@ -750,6 +750,131 @@ class MovingAnchorCallback(TrainerCallback):
                                   "anchor/step": float(state.global_step)})
 
 
+class MovingRefAdapterCallback(TrainerCallback):
+    """Ancre KL MOBILE SANS merge-and-restart (exp46, « vraie LoRA à référence mobile »).
+
+    Objet : séparer les trois facteurs confondus dans MovingAnchorCallback (ReLoRA) —
+    déplacement de la référence, accumulation de rang + reset du produit B·A, purge
+    d'Adam. Ici UN SEUL adaptateur vivant (`default`, rang r pendant tout le run,
+    jamais fusionné, jamais réinitialisé, Adam jamais purgé) et un second adaptateur
+    FIGÉ nommé `ref`, de même config, qui sert de référence KL.
+
+    Mécanique côté TRL (grpo_trainer, calcul des ref-logprobs avec PEFT) :
+        with use_adapter(model, "ref" if "ref" in model.peft_config else None): ...
+    → si un adaptateur `ref` existe, TRL l'active pour le passage avant de référence
+    au lieu de désactiver l'adaptateur (= Qwen nu). Il ne manque que la recopie
+    périodique : c'est ce callback.
+
+    À chaque frontière de N epochs (on_step_end) :
+      1. snapshot de l'adaptateur vivant dans <anchors_dir>/cycle<k> (traçabilité,
+         et reprise : `initial_cycle` recharge cycle<k> dans `ref`) ;
+      2. copie en place des matrices A et B de `default` vers `ref` → la référence
+         devient la politique de ce point, la politique elle-même est inchangée.
+    Rien d'autre ne bouge : ni la base, ni l'optimiseur.
+
+    Invariants (vérifiés par src/train/selftest_moving_ref.py) : `default` reste
+    l'adaptateur actif ; `ref` a requires_grad=False (hors optimiseur, hors
+    gradient) ; juste après une copie, logits(ref) == logits(default) donc KL = 0 ;
+    la sync vLLM de TRL fusionne l'adaptateur ACTIF seulement et ignore les clés
+    `lora_` → `ref` n'atteint jamais le moteur de génération.
+    """
+
+    REF = "ref"
+
+    def __init__(self, every_epochs: float, anchors_dir: str,
+                 initial_cycle: int = 0) -> None:
+        self.every = every_epochs
+        self.anchors_dir = anchors_dir
+        self.cycle = initial_cycle
+        self.trainer_ref: Any = None
+
+    # ---- appelé UNE fois après la création du GRPOTrainer (avant train()) ----
+    def attach(self, trainer: Any) -> None:
+        import copy
+        import os
+
+        from peft import set_peft_model_state_dict
+        from safetensors.torch import load_file
+
+        self.trainer_ref = trainer
+        model = trainer.accelerator.unwrap_model(trainer.model)
+        if self.REF in model.peft_config:
+            raise RuntimeError("un adaptateur 'ref' existe déjà sur le modèle")
+        live = model.active_adapter
+        ref_cfg = copy.deepcopy(model.peft_config[live])
+        ref_cfg.inference_mode = True
+        # add_adapter ne change pas l'adaptateur actif ; init PEFT : A=kaiming, B=0 →
+        # `ref` ≡ base au départ, la KL commence à 0 comme avec l'ancre fixe.
+        model.add_adapter(self.REF, ref_cfg)
+        model.set_adapter(live)
+        n_ref = self._freeze_ref(model)
+        if self.cycle > 0:
+            # Reprise : la référence est la politique du dernier ré-ancrage = snapshot cycle<k>.
+            cyc = os.path.join(self.anchors_dir, f"cycle{self.cycle}", "adapter_model.safetensors")
+            sd = load_file(cyc)
+            res = set_peft_model_state_dict(model, sd, adapter_name=self.REF)
+            print(f"[moving-ref] reprise : 'ref' rechargé depuis {cyc} "
+                  f"(clés inattendues : {len(getattr(res, 'unexpected_keys', []))})", flush=True)
+        print(f"[moving-ref] adaptateur de référence 'ref' ajouté ({n_ref} tenseurs, figés) ; "
+              f"actif = '{model.active_adapter}' ; recopie default→ref toutes les "
+              f"{self.every:g} epochs", flush=True)
+
+    def _freeze_ref(self, model: Any) -> int:
+        n = 0
+        for name, p in model.named_parameters():
+            if f".{self.REF}." in name:
+                p.requires_grad_(False); n += 1
+        return n
+
+    @staticmethod
+    def _lora_pairs(model: Any, src: str, dst: str):
+        """Couples (tenseur source, tenseur destination) A et B de chaque couche LoRA."""
+        from peft.tuners.lora.layer import LoraLayer
+        for module in model.modules():
+            if not isinstance(module, LoraLayer):
+                continue
+            for attr in ("lora_A", "lora_B"):
+                d = getattr(module, attr)
+                if src in d and dst in d:
+                    yield d[src].weight, d[dst].weight
+
+    def copy_live_to_ref(self, model: Any) -> int:
+        import torch
+        n = 0
+        with torch.no_grad():
+            for s, d in self._lora_pairs(model, model.active_adapter, self.REF):
+                d.copy_(s); n += 1
+        self._freeze_ref(model)
+        return n
+
+    def on_step_end(self, targs: Any, state: Any, control: Any, **kwargs: Any) -> None:
+        if state.epoch is None or state.epoch + 1e-9 < (self.cycle + 1) * self.every:
+            return
+        import json
+        import os
+        import time
+
+        t0 = time.time()
+        self.cycle += 1
+        model = self.trainer_ref.accelerator.unwrap_model(self.trainer_ref.model)
+        live = model.active_adapter
+        cycle_dir = os.path.join(self.anchors_dir, f"cycle{self.cycle}")
+        model.save_pretrained(cycle_dir, selected_adapters=[live])
+        n = self.copy_live_to_ref(model)
+        os.makedirs(self.anchors_dir, exist_ok=True)
+        with open(os.path.join(self.anchors_dir, "chain.jsonl"), "a") as f:
+            f.write(json.dumps({"cycle": self.cycle, "step": state.global_step,
+                                "epoch": round(float(state.epoch), 3), "mode": "ref"}) + "\n")
+        print(f"[moving-ref] >>> RÉ-ANCRAGE #{self.cycle} @ step {state.global_step} "
+              f"(epoch {state.epoch:.2f}) : adaptateur vivant sauvé ({cycle_dir}), "
+              f"{n} tenseurs A/B recopiés dans 'ref' — la référence KL est la politique de "
+              f"ce point ; adaptateur, base et optimiseur inchangés ({time.time() - t0:.1f}s)",
+              flush=True)
+        if hasattr(self.trainer_ref, "log"):
+            self.trainer_ref.log({"anchor/cycle": float(self.cycle),
+                                  "anchor/step": float(state.global_step)})
+
+
 if __name__ == "__main__":
     from types import SimpleNamespace
 

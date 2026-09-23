@@ -23,6 +23,11 @@ REPO_ROOT = Path(os.environ.get("REPO_ROOT", Path(__file__).resolve().parents[2]
 # mais retéléchargeable en ~2 min via setup/ensure_qwen_tmp.sh).
 DEFAULT_MODEL_PATH = Path("/tmp/models/Qwen2.5-3B-Instruct")
 TRAIN_PATH = REPO_ROOT / "data" / "train" / "textcraft_train.json"
+
+
+def depth_file_for(train_path: Path) -> Path:
+    """Fichier de depths associé à un fichier de train : <stem>_with_depth.json à côté."""
+    return train_path.with_name(train_path.stem + "_with_depth.json")
 ENV_SERVER_URL = "http://127.0.0.1:36005"
 
 DEFAULT_SYSTEM_PROMPT = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
@@ -47,7 +52,8 @@ def check_server() -> None:
 def build_prompt_rows(max_items: int, max_depth: int = 0, system_prompt: str = DEFAULT_SYSTEM_PROMPT,
                       depth_in: set[int] | None = None,
                       fewshot_block: str | None = None,
-                      fewshot_messages: list[dict] | None = None) -> list[dict[str, Any]]:
+                      fewshot_messages: list[dict] | None = None,
+                      train_path: Path | None = None) -> list[dict[str, Any]]:
     """Build the list of prompt rows for rollout_func, optionally filtering by depth and max_items.
 
     Deux modes de filtrage par depth (exclusifs) :
@@ -61,13 +67,16 @@ def build_prompt_rows(max_items: int, max_depth: int = 0, system_prompt: str = D
     fusionnée avec le message porteur du marqueur <ITEM_IDX:n> (pas de tours user
     consécutifs). Les tokens des exemples sont dans prompt_ids → jamais de gradient."""
 
-    with TRAIN_PATH.open() as f:
+    train_path = Path(train_path) if train_path else TRAIN_PATH
+    with train_path.open() as f:
         rows = json.load(f)
+    if train_path != TRAIN_PATH:
+        print(f"[data] fichier de train : {train_path} ({len(rows)} items)", flush=True)
 
     if max_depth > 0 or depth_in:
         # Filtre par depth. Requiert le mapping pré-calculé
         # data/train/textcraft_train_with_depth.json (src/utils/label_depths.py).
-        depth_file = REPO_ROOT / "data" / "train" / "textcraft_train_with_depth.json"
+        depth_file = depth_file_for(train_path)
         if not depth_file.exists():
             raise FileNotFoundError(
                 f"--max-depth/--depth-exact requires {depth_file}. "

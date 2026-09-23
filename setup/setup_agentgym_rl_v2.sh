@@ -18,6 +18,8 @@ ENV_DIR="${1:-/tmp/envs/agentgym-rl-v2}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # Python 3.11 requis (wheel flash-attn cp311). pyenv d'abord, sinon l'env textcraft.
 BASE_PYTHON="/opt/pyenv/versions/3.11.7/bin/python"
+# Pod recréé le 17/09/2026 : /opt/pyenv a disparu, remplacé par un Python 3.11 géré par uv (/opt/uv).
+[ -x "$BASE_PYTHON" ] || BASE_PYTHON="/opt/uv/bin/python3.11"
 [ -x "$BASE_PYTHON" ] || BASE_PYTHON="$HOME/envs/agentenv-textcraft/bin/python"
 CACHE="/tmp/pip-cache"
 
@@ -63,5 +65,8 @@ print(f"vllm={vllm.__version__} trl={trl.__version__} peft={peft.__version__} "
       f"torch={torch.__version__} bnb={bitsandbytes.__version__}")
 print("TextCraftEnvClient importé OK")
 EOF
+# Borne k3 optionnelle (verl clampe low_var_kl à 10, TRL non) — inerte sans TRL_KL_CLAMP,
+# activée par train_grpo.py --kl-clamp. Idempotent ; échoue proprement si TRL a changé.
+"$ENV_DIR/bin/python" "$(dirname "$0")/patch_trl_kl_clamp.py" || echo "[setup-v2] AVERTISSEMENT : patch k3 non appliqué (voir ci-dessus)"
 echo "[setup-v2] Terminé : $ENV_DIR"
 echo "[setup-v2] Utilisation : $ENV_DIR/bin/python src/train/train_grpo.py ... (PATH: export PATH=$ENV_DIR/bin:\$PATH)"

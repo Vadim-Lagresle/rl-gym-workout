@@ -107,6 +107,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Coefficient du bonus d'entropie dans la loss (loss -= coef × "
                              "entropie moyenne par token actif). verl/papier : 0.001 "
                              "(dp_actor.py:253). 0 = off (défaut, sémantique exp10-22).")
+    parser.add_argument("--kl-clamp", type=float, default=0.0,
+                        help="Borne haute de l'estimateur KL k3 PAR TOKEN dans la loss (0 = off, "
+                             "défaut TRL, sémantique exp10-42). verl/papier : 10 (low_var_kl clampé "
+                             "à [-10, 10], core_algos.py:381). Nécessite le patch "
+                             "setup/patch_trl_kl_clamp.py (vérifié au démarrage). Décision 15/09.")
     parser.add_argument("--full-ft", action="store_true", default=False,
                         help="Full fine-tuning (no LoRA). Requires more VRAM — use on B200.")
     parser.add_argument("--lora-r", type=int, default=16,
@@ -121,6 +126,13 @@ def build_parser() -> argparse.ArgumentParser:
                              "réinitialisé (A=kaiming, B=0), moments Adam LoRA purgés. La KL "
                              "mesure alors la distance au DERNIER ré-ancrage, plus à Qwen nu. "
                              "0 = off (ancre fixe historique). Détail : schedules.MovingAnchorCallback.")
+    parser.add_argument("--moving-anchor-mode", choices=["merge", "ref"], default="merge",
+                        help="Mécanisme de l'ancre mobile. 'merge' (défaut, exp25→43) : "
+                             "merge-and-restart = ReLoRA (rang accumulé, B·A et Adam remis à zéro). "
+                             "'ref' (exp46) : UN adaptateur vivant jamais fusionné ni réinitialisé, "
+                             "et un adaptateur figé 'ref' recopié depuis le vivant toutes les N "
+                             "epochs, lu par TRL comme référence KL. Sépare « référence mobile » "
+                             "de « merge-and-restart ». Détail : schedules.MovingRefAdapterCallback.")
     parser.add_argument("--moving-anchor-initial-cycle", type=int, default=0,
                         help="Reprise (--resume-from-checkpoint) d'un run à ancre mobile : nombre "
                              "de ré-ancrages DÉJÀ effectués par le run d'origine (cf. chain.jsonl). "
@@ -241,6 +253,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Palier de départ (reprise après purge : mettre le dernier "
                              "palier atteint avant l'interruption, lu dans les logs "
                              "'[depth-auto] >>> PALIER depth<=X').")
+    parser.add_argument("--train-file", type=str, default="",
+                        help="Fichier de train alternatif (liste d'item_id), relatif au repo ou absolu. "
+                             "Son fichier de depths est <stem>_with_depth.json à côté. Défaut : "
+                             "data/train/textcraft_train.json. exp48 : "
+                             "data/train/textcraft_train_plus_reservoir.json (train + réservoir few-shot).")
+    parser.add_argument("--depth-balance", choices=["none", "uniform", "sqrt"], default="none",
+                        help="Échantillonnage pondéré FIXE par profondeur (exp48, F). 'uniform' : chaque "
+                             "profondeur pèse 1/4 des tirages ; 'sqrt' : poids d'une profondeur ∝ √n_d "
+                             "(n_d = nb d'items de cette profondeur). Exclusif avec les curriculums "
+                             "par échantillonnage et --goal-sampler.")
     parser.add_argument("--goal-sampler", type=str, default="uniform",
                         choices=["uniform", "online", "ek_depth", "magellan"],
                         help=(
@@ -411,6 +433,17 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
     passe ici sa rollout_func SNIS — c'est le SEUL point de variation entre les deux."""
     if args is None:
         args = build_parser().parse_args()
+    if args.kl_clamp > 0:
+        # Borne k3 : la ligne vit dans TRL (patchée par setup/patch_trl_kl_clamp.py) et ne
+        # s'active que via la variable d'environnement — on vérifie AVANT tout chargement GPU.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("patch_trl_kl_clamp", REPO_ROOT / "setup" / "patch_trl_kl_clamp.py")
+        patch = importlib.util.module_from_spec(spec); spec.loader.exec_module(patch)
+        if patch.MARKER not in patch.trl_file().read_text():
+            raise SystemExit(f"--kl-clamp {args.kl_clamp} demandé mais TRL n'est pas patché "
+                             f"({patch.trl_file()}). Lancer : python setup/patch_trl_kl_clamp.py")
+        os.environ["TRL_KL_CLAMP"] = str(args.kl_clamp)
+        print(f"[kl-clamp] TRL_KL_CLAMP={args.kl_clamp} (borne k3 par token, comme verl)", flush=True)
     if args.plan_mode:
         if rollout_func is not None:
             raise SystemExit("--plan-mode est incompatible avec une rollout_func externe (SNIS).")
@@ -511,9 +544,15 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
                                       system_prompt=args.system_prompt,
                                       fewshot_messages=fewshot_messages)
     else:
+        train_path = None
+        if args.train_file:
+            train_path = Path(args.train_file)
+            if not train_path.is_absolute():
+                train_path = REPO_ROOT / train_path
         rows = build_prompt_rows(max_items=args.max_items, max_depth=args.max_depth,
                                  system_prompt=args.system_prompt, depth_in=depth_in,
-                                 fewshot_block=fewshot_block, fewshot_messages=fewshot_messages)
+                                 fewshot_block=fewshot_block, fewshot_messages=fewshot_messages,
+                                 train_path=train_path)
     dataset = Dataset.from_list(rows)
 
     tokenizer = AutoTokenizer.from_pretrained(str(model_path))
@@ -555,7 +594,8 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         # grad_norm=1765 spike at step 35 of v2 — see WORKLOG step50 anomaly).
         max_grad_norm=1.0,
         # KL regularization: paper uses kl_loss_coef=0.001 (low_var_kl type).
-        # TRL beta is equivalent; TRL already uses the same k3 estimator as verl low_var_kl.
+        # TRL beta is equivalent; TRL uses the same k3 estimator as verl low_var_kl MAIS sans
+        # la borne [-10, 10] par token de verl (core_algos.py:381) — cf. --kl-clamp (15/09/2026).
         # Configurable: en LoRA + LR eleve, beta=0.001 est trop faible -> runaway KL
         # (cf. effondrement exp10). Remonter beta resserre l'ancrage a la reference.
         beta=args.beta,
@@ -746,11 +786,15 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
             raise SystemExit("--moving-anchor-initial-cycle > 0 n'a de sens qu'avec "
                              "--resume-from-checkpoint (reprise d'un run à ancre mobile).")
         anchors_dir = str(REPO_ROOT / "saves" / "trl_grpo" / f"{args.run_name}_anchors")
-        anchor_cb = schedules.MovingAnchorCallback(
+        anchor_cls = (schedules.MovingRefAdapterCallback if args.moving_anchor_mode == "ref"
+                      else schedules.MovingAnchorCallback)
+        anchor_cb = anchor_cls(
             every_epochs=args.moving_anchor_every_epochs, anchors_dir=anchors_dir,
             initial_cycle=args.moving_anchor_initial_cycle)
         callbacks.append(anchor_cb)
-        print(f"[moving-anchor] ancre KL mobile : merge-and-restart toutes les "
+        print(f"[moving-anchor] ancre KL mobile : "
+              f"{'recopie default→ref (adaptateur figé)' if args.moving_anchor_mode == 'ref' else 'merge-and-restart'}"
+              f" toutes les "
               f"{args.moving_anchor_every_epochs:g} epochs — snapshots de chaîne dans "
               f"{anchors_dir}"
               + (f" (reprise : {args.moving_anchor_initial_cycle} cycles déjà faits, "
@@ -793,20 +837,23 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         warm_opt_cb.trainer_ref = trainer
     if anchor_cb is not None:
         anchor_cb.trainer_ref = trainer
+        if hasattr(anchor_cb, "attach"):   # mode 'ref' : ajoute l'adaptateur figé AVANT train()
+            anchor_cb.attach(trainer)
 
     # --- Curriculum par échantillonnage : depth par paliers (exp33) ou
     # --- autocurriculum ALP (exp34, port MAGELLAN — src/train/magellan.py) ---
-    if args.depth_schedule_epochs or args.depth_schedule_auto or args.goal_sampler != "uniform":
+    if (args.depth_schedule_epochs or args.depth_schedule_auto or args.goal_sampler != "uniform"
+            or args.depth_balance != "none"):
         import json as _json
         from types import MethodType
 
         from src.train import magellan as mgl
 
         n_modes = sum([bool(args.depth_schedule_epochs), bool(args.depth_schedule_auto),
-                       args.goal_sampler != "uniform"])
+                       args.goal_sampler != "uniform", args.depth_balance != "none"])
         if n_modes > 1:
-            raise SystemExit("--depth-schedule-epochs, --depth-schedule-auto et "
-                             "--goal-sampler sont mutuellement exclusifs.")
+            raise SystemExit("--depth-schedule-epochs, --depth-schedule-auto, --goal-sampler et "
+                             "--depth-balance sont mutuellement exclusifs.")
         if args.max_depth or args.depth_exact:
             raise SystemExit("Le curriculum par échantillonnage travaille sur le dataset "
                              "ENTIER : incompatible avec --max-depth/--depth-exact.")
@@ -814,7 +861,11 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
             raise SystemExit("Le sampler pondéré lit les poids en direct : "
                              "dataloader_num_workers doit rester 0.")
 
-        depth_file = REPO_ROOT / "data" / "train" / "textcraft_train_with_depth.json"
+        from src.train.data import TRAIN_PATH, depth_file_for
+        _tp = Path(args.train_file) if args.train_file else TRAIN_PATH
+        if not _tp.is_absolute():
+            _tp = REPO_ROOT / _tp
+        depth_file = depth_file_for(_tp)
         with depth_file.open() as f:
             depth_map = _json.load(f)
         depths = [int(depth_map.get(r["item_id"], 99)) for r in rows]
@@ -822,7 +873,15 @@ def main(args: argparse.Namespace | None = None, rollout_func=None) -> None:
         depth_of = dict(enumerate(depths))
 
         magellan_cb = None
-        if args.depth_schedule_auto:
+        if args.depth_balance != "none":
+            probs_fixed = mgl.depth_balance_probs(depths, args.depth_balance)
+            prob_fn = lambda: probs_fixed  # noqa: E731
+            import numpy as np
+            _d = np.asarray(depths)
+            print(f"[depth-balance] échantillonnage '{args.depth_balance}' : masse par profondeur "
+                  + ", ".join(f"d{d}={probs_fixed[_d == d].sum():.3f} ({int((_d == d).sum())} items)"
+                              for d in sorted(set(depths))), flush=True)
+        elif args.depth_schedule_auto:
             # exp33.1 — palier déclenché au reward train (fenêtre = 1 epoch de steps).
             steps_per_epoch = max(1, len(rows) * args.num_generations
                                   // args.gradient_accumulation_steps)

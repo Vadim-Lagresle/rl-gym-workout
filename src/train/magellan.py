@@ -587,6 +587,19 @@ class WeightedRepeatSampler:
             * self.mini_repeat_count * self.repeat_count
 
 
+def depth_balance_probs(depths: list[int], mode: str) -> np.ndarray:
+    """Probabilités fixes par item pour un rééquilibrage par profondeur (exp48).
+    uniform : chaque profondeur reçoit la même masse, répartie uniformément sur ses items ;
+    sqrt    : masse d'une profondeur ∝ √n_d (compromis entre l'uniforme par item et par profondeur)."""
+    d = np.asarray(depths)
+    levels = sorted(set(d.tolist()))
+    n = {k: int((d == k).sum()) for k in levels}
+    mass = {k: (1.0 if mode == "uniform" else np.sqrt(n[k])) for k in levels}
+    tot = sum(mass.values())
+    p = np.array([mass[k] / tot / n[k] for k in d.tolist()], dtype=np.float64)
+    return p / p.sum()
+
+
 class DepthScheduleProvider:
     """Curriculum depth par paliers (exp33) : prob_fn = uniforme sur les items de
     depth <= palier(epoch). Spec '1:0,2:6,3:20,4:45' = depth max 1 dès l'epoch 0,
