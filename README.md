@@ -182,7 +182,7 @@ The lessons that the code encodes:
 |---|---|
 | ![ReLoRA ablation](docs/post_rapport/figures/fig5_relora_ablation.png) | ![Drift clock](docs/post_rapport/figures/fig6_drift_clock.png) |
 
-The figures are labelled in French. The internship report covers lessons 1 to 4; lessons 5 and 6
+The figures are labelled in French. The internship report ([`docs/rapport/`](docs/rapport/), LaTeX sources in French and English) covers lessons 1 to 4; lessons 5 and 6
 come from the runs that followed it, analysed in
 [`docs/post_rapport/BILAN_FINAL.md`](docs/post_rapport/BILAN_FINAL.md) (French). Every run is
 registered in [`runs/INDEX.md`](runs/INDEX.md).
@@ -213,6 +213,9 @@ machine differs:
 **Steps.**
 
 ```bash
+# 0. The code, with the AgentGym and MAGELLAN submodules
+git clone --recursive https://github.com/Vadim-Lagresle/rl-gym-workout.git && cd rl-gym-workout
+
 # 1. Training environment: recent TRL and vLLM, flash-attention, and the KL-bound patch for TRL
 bash setup/setup_agentgym_rl_v2.sh
 export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH"
@@ -221,8 +224,9 @@ export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH"
 bash setup/ensure_qwen_tmp.sh
 
 # 3. TextCraft server, in its own virtualenv (requirements: setup/requirements-agentenv-textcraft.txt).
-#    Get the AgentGym code (https://github.com/WooooDyy/AgentGym) into external/AgentGym, then start
-#    the server FROM the package folder: it reads its recipe files with a relative path.
+#    AgentGym is a git submodule (clone with --recursive, or fetch it now), then start the server
+#    FROM the package folder: it reads its recipe files with a relative path.
+git submodule update --init external/AgentGym
 cd external/AgentGym/agentenv-textcraft && textcraft --host 127.0.0.1 --port 36005
 
 # 4. Check everything on CPU, then on GPU (3 updates, a few minutes)
@@ -345,10 +349,10 @@ plays the episodes through `vllm_engine.py` with the caps given by `horizon_sche
 | `data/` | task lists: TextCraft train, test, depths, few-shot reservoir; other AgentGym environments for future work |
 | `runs/` | one folder per experiment family (configs, evaluation logs); `INDEX.md` is the registry of all runs |
 | `archive/` | code no longer used, with a README per folder saying why and what replaced it |
-| `external/` | third-party code: AgentGym (the TextCraft server) and the reference paper's code (not in the public repository) |
+| `external/` | third-party code. `AgentGym` (the TextCraft server) and `MAGELLAN` are git submodules pinned to unmodified upstream commits (`git clone --recursive`); `AgentGym-RL` is a copy of the reference paper's verl code (Apache 2.0, `VERL_LICENSE`, `Notice.txt`); `agentgym_rl_paper/` holds the paper's scripts. `USAGE.md` says which files the project actually uses |
 | `logs/` | text output of every run, the queue and the server; the figure scripts read their metrics here (not versioned) |
 | `saves/`, `wandb/` | checkpoints, best models, W&B files (not versioned) |
-| `docs/post_rapport/` | final analyses of the last runs: `BILAN_FINAL.md` (conclusions), `ANALYSE_runs_post_rapport.md` (run by run), the figures and the two scripts that rebuild them from the logs. The rest of `docs/` (report, weekly notes) is not in the public repository |
+| `docs/` | everything written along the way, in French: `post_rapport/` (final analyses of the last runs: `BILAN_FINAL.md`, `ANALYSE_runs_post_rapport.md`, figures and the scripts that rebuild them), `rapport/` (internship report, LaTeX, French and English, with its figures), `slides/`, `hebdo/` (weekly notes), `RESULTS.md` (results table, one block per run), `WORKLOG.md` (journal up to June), `MAGELLAN_ANALYSE.md` (study of the MAGELLAN autocurriculum), `PLAN_EXPERIENCES.md`, `dashboard/`, `archive/` |
 
 ---
 

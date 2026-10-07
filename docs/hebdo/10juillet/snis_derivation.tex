@@ -1,0 +1,259 @@
+\documentclass{article}
+\usepackage[utf8]{inputenc}
+\usepackage[french]{babel}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+
+% Raccourcis
+\newcommand{\pref}[2]{s_{#1:#2}}                     % préfixe d'indices s_{a:b}
+\newcommand{\w}[2]{\omega\big(#1 \mid #2\big)}       % poids SNIS
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prob}{\mathbb{P}}
+
+\begin{document}
+
+\title{Dérivation SNIS multi-tour :\\
+pourquoi l'échantillonnage ancestral absorbe les poids}
+\author{Implémentation \texttt{src/train/train\_grpo\_snis.py}}
+\date{9 juillet 2026}
+\maketitle
+
+\section{Cadre et notations}
+
+On fixe un prompt $x$ et le \textbf{pool} des $G$ trajectoires réelles générées par
+GRPO. Toutes les quantités ci-dessous sont conditionnelles à ce pool : les tours
+$z^k_j$ sont des objets \emph{fixés} (des séquences de tokens déjà générées), et la
+seule source d'aléa considérée ici est le choix des \textbf{indices}
+$s_k \in \{1,\dots,G\}$. On note un préfixe d'indices
+$\pref{1}{k-1} = (s_1, \dots, s_{k-1})$, et on définit le poids SNIS du tour $k$ :
+\begin{equation}
+\w{s_k}{\pref{1}{k-1}}
+\;=\;
+\frac{\pi_\theta\big(z^{k}_{s_k} \,\big|\, x,\; z^1_{s_1}, \ldots, z^{k-1}_{s_{k-1}}\big)}
+     {\displaystyle\sum_{l=1}^{G} \pi_\theta\big(z^{k}_{l} \,\big|\, x,\; z^1_{s_1}, \ldots, z^{k-1}_{s_{k-1}}\big)}
+\label{eq:poids}
+\end{equation}
+ainsi que la fonction dont on veut la moyenne (le terme le plus interne de la
+formule forward) :
+\begin{equation}
+f(s_1, \ldots, s_N)
+\;=\;
+\nabla_\theta \log \pi_\theta\big((z^k_{s_k})_{k=1}^{N} \,\big|\, x\big)
+\cdot r\big(x,\, z^N_{s_N}\big).
+\label{eq:f}
+\end{equation}
+
+La formule forward de la note s'écrit alors :
+\begin{equation}
+\hat{\nabla}_\theta V
+\;=\;
+\frac{1}{G} \sum_{s_1=1}^{G}\;
+\underbrace{\sum_{s_2=1}^{G} \w{s_2}{s_1}
+\sum_{s_3=1}^{G} \w{s_3}{\pref{1}{2}} \cdots
+\sum_{s_N=1}^{G} \w{s_N}{\pref{1}{N-1}}\;
+f(s_1, \ldots, s_N)}_{=:\;S(s_1)}.
+\label{eq:forward}
+\end{equation}
+Tout le travail porte sur le bloc interne $S(s_1)$, qui contient $G^{N-1}$ termes.
+
+\section{Étape 1 --- À chaque niveau, les poids somment à 1}
+
+Pour \emph{n'importe quel} préfixe $\pref{1}{k-1}$ fixé :
+\begin{equation}
+\sum_{s_k=1}^{G} \w{s_k}{\pref{1}{k-1}}
+= \frac{\sum_{s_k=1}^{G} \pi_\theta\big(z^k_{s_k} \mid x, z^1_{s_1},\ldots\big)}
+       {\sum_{l=1}^{G} \pi_\theta\big(z^k_{l} \mid x, z^1_{s_1},\ldots\big)}
+= 1.
+\label{eq:normalisation}
+\end{equation}
+C'est trivial --- le dénominateur \emph{est} la somme des numérateurs --- mais c'est
+\textbf{la} propriété structurelle du self-normalized IS : sans le dénominateur, les
+$\pi(z^k_l \mid \cdot)$ ne sommeraient à rien de particulier (ce sont $G$
+évaluations de densité, pas une partition de l'espace). Avec lui, et comme
+$\pi_\theta > 0$, on a pour chaque préfixe fixé :
+\begin{center}
+$\w{\cdot}{\pref{1}{k-1}}$ est une loi de probabilité sur $\{1, \ldots, G\}$.
+\end{center}
+
+\section{Étape 2 --- Le produit des poids est une loi jointe sur les combinaisons}
+
+Pour $s_1$ fixé, on définit :
+\begin{equation}
+P\big(s_2, \ldots, s_N \mid s_1\big)
+\;=\;
+\prod_{k=2}^{N} \w{s_k}{\pref{1}{k-1}}.
+\label{eq:loiP}
+\end{equation}
+
+\paragraph{Affirmation.} $P(\cdot \mid s_1)$ est une loi de probabilité sur
+l'ensemble des $G^{N-1}$ combinaisons $(s_2,\ldots,s_N) \in \{1,\ldots,G\}^{N-1}$.
+
+\paragraph{Preuve.} Positivité : produit de termes strictement positifs.
+Normalisation : on somme, et on fait sortir les sommes une par une \emph{en
+commençant par la plus interne}. L'argument qui l'autorise : $\w{s_N}{\pref{1}{N-1}}$
+est le \emph{seul} facteur du produit qui dépend de $s_N$, donc :
+\begin{equation}
+\sum_{s_2, \ldots, s_N} \prod_{k=2}^{N} \w{s_k}{\pref{1}{k-1}}
+= \sum_{s_2, \ldots, s_{N-1}} \left[ \prod_{k=2}^{N-1} \w{s_k}{\pref{1}{k-1}} \right]
+  \underbrace{\sum_{s_N} \w{s_N}{\pref{1}{N-1}}}_{=\,1 \;\;\text{par \eqref{eq:normalisation}}}.
+\end{equation}
+Le point subtil : la somme interne vaut $1$ \textbf{quelle que soit la valeur du
+préfixe} $\pref{1}{N-1}$ (l'équation \eqref{eq:normalisation} est valable pour tout
+préfixe) --- c'est ce qui permet de la remplacer par $1$ \emph{à l'intérieur} de la
+somme externe. On répète l'argument : la somme sur $s_{N-1}$ vaut alors $1$ pour
+tout $\pref{1}{N-2}$, etc. Le télescope descend jusqu'à :
+\begin{equation}
+\sum_{s_2} \w{s_2}{s_1} = 1
+\qquad\Longrightarrow\qquad
+\sum_{s_2, \ldots, s_N} P\big(s_2,\ldots,s_N \mid s_1\big) = 1. \qquad \blacksquare
+\end{equation}
+
+\section{Étape 3 --- La somme imbriquée EST une espérance sous $P$}
+
+Le bloc $S(s_1)$ de la formule \eqref{eq:forward} est exactement la moyenne de $f$
+pesée par $P$. On distribue les poids vers l'intérieur : chaque $\w{s_k}{\cdot}$ est
+une constante vis-à-vis des sommes sur $s_{k+1},\ldots,s_N$ situées à sa droite,
+donc il entre dedans :
+\begin{align}
+S(s_1)
+&= \sum_{s_2} \w{s_2}{s_1} \sum_{s_3} \w{s_3}{\pref{1}{2}} \cdots
+   \sum_{s_N} \w{s_N}{\pref{1}{N-1}}\, f(\pref{1}{N}) \\
+&= \sum_{s_2, \ldots, s_N} \left[ \prod_{k=2}^{N} \w{s_k}{\pref{1}{k-1}} \right]
+   f(s_1, s_2, \ldots, s_N)
+\end{align}
+soit, par définition de $P$ \eqref{eq:loiP} puis de l'espérance d'une variable
+discrète :
+\begin{equation}
+\boxed{\;
+S(s_1)
+= \sum_{s_2, \ldots, s_N} P\big(\pref{2}{N} \mid s_1\big)\, f(s_1, \pref{2}{N})
+= \E_{\,\pref{2}{N} \sim P(\cdot \mid s_1)}\big[\, f(s_1, \pref{2}{N}) \,\big].
+\;}
+\label{eq:esperance}
+\end{equation}
+Rien d'approximatif jusqu'ici : c'est une \textbf{réécriture exacte} de la formule
+\eqref{eq:forward}. Elle ne devient utile qu'avec les étapes 4 et 5.
+
+\section{Étape 4 --- Estimateur Monte-Carlo de cette espérance}
+
+Principe général : si $P$ est une loi sur un ensemble fini et
+$S^{(1)}, \ldots, S^{(M)} \overset{iid}{\sim} P$, alors
+\begin{equation}
+\widehat{E}_M = \frac{1}{M} \sum_{m=1}^{M} f\big(S^{(m)}\big),
+\qquad
+\E\big[\widehat{E}_M\big] = \sum_{s} P(s)\, f(s) = \E_P[f]
+\end{equation}
+--- estimateur \textbf{sans biais quel que soit $M$}, y compris $M=1$. On applique
+ceci à chaque $S(s_1)$ avec $M=1$ (un seul tirage par valeur de $s_1$ : contrainte
+des $G$ sorties attendues par TRL) :
+\begin{equation}
+\widehat{\nabla_\theta V}
+= \frac{1}{G} \sum_{s_1=1}^{G} f\big(s_1,\, S^{(s_1)}\big),
+\qquad S^{(s_1)} \sim P(\cdot \mid s_1),
+\label{eq:estimateur}
+\end{equation}
+et par linéarité de l'espérance :
+\begin{equation}
+\E\Big[\widehat{\nabla_\theta V} \;\Big|\; \text{pool}\Big]
+= \frac{1}{G} \sum_{s_1=1}^{G} \E_{P(\cdot \mid s_1)}[f]
+\overset{\eqref{eq:esperance}}{=} \frac{1}{G} \sum_{s_1=1}^{G} S(s_1)
+\overset{\eqref{eq:forward}}{=} \hat{\nabla}_\theta V
+\quad \text{(la formule, exactement).}
+\end{equation}
+
+\paragraph{Hiérarchie des deux niveaux d'estimation.} Notre tirage est
+\textbf{sans biais pour la formule} \eqref{eq:forward}, conditionnellement au pool ;
+la formule SNIS est elle-même un estimateur \textbf{biaisé en $O(1/G)$} du vrai
+gradient (le dénominateur de \eqref{eq:poids} est une \emph{estimation} de la
+constante de normalisation, pas sa valeur exacte --- biais classique du SNIS). Le
+Monte-Carlo n'ajoute que de la variance, pas de biais.
+
+\section{Étape 5 --- L'échantillonnage ancestral tire exactement de $P$}
+
+Comment obtenir $S^{(s_1)} \sim P(\cdot \mid s_1)$ sans énumérer les $G^{N-1}$
+combinaisons ? Par la \textbf{règle de chaînage} : on tire séquentiellement
+\begin{equation}
+s_2 \sim \w{\cdot}{s_1}, \qquad
+s_3 \sim \w{\cdot}{\pref{1}{2}}, \qquad \ldots, \qquad
+s_N \sim \w{\cdot}{\pref{1}{N-1}},
+\end{equation}
+chaque tirage utilisant le préfixe \emph{déjà réalisé} aux étapes précédentes.
+La loi jointe du vecteur obtenu est, par construction du tirage séquentiel :
+\begin{equation}
+\Prob\big(s_2 = a_2, \ldots, s_N = a_N\big)
+= \prod_{k=2}^{N} \Prob\big(s_k = a_k \mid s_2 = a_2, \ldots, s_{k-1} = a_{k-1}\big)
+= \prod_{k=2}^{N} \w{a_k}{s_1, \pref{2}{k-1} = a_{2:k-1}}
+= P\big(a_{2:N} \mid s_1\big).
+\end{equation}
+C'est un tirage \textbf{exact} (pas approché) parce que $P$ a été \emph{définie}
+sous forme factorisée : ses conditionnelles sont précisément les $\omega$.
+Coût : $G$ scorings par niveau, soit $O(N \cdot G)$ scorings par combo au lieu de
+$G^N$ termes.
+
+\section{Étape 6 --- « Absorption des poids » : les deux estimateurs côte à côte}
+
+Deux façons d'obtenir la même espérance $\E_P[f]$ :
+\begin{equation}
+\text{(a) somme exhaustive : } \sum_{s} P(s)\, f(s)
+\qquad\qquad
+\text{(b) Monte-Carlo : } f(S), \;\; S \sim P.
+\end{equation}
+En (a), les poids apparaissent \textbf{explicitement comme coefficients} --- c'est
+la formule \eqref{eq:forward}, $G^{N-1}$ termes. En (b), les poids n'apparaissent
+\textbf{que dans le tireur} ; la quantité utilisée est $f(S)$ avec coefficient $1$.
+L'égalité $\E[f(S)] = \sum_s P(s) f(s)$ dit que (b) estime (a) sans qu'aucun poids
+ne survive dans l'expression finale.
+
+Traduction dans le pipeline d'entraînement : la quantité que TRL calcule pour chaque
+combo retourné est $f(\text{combo}) = \nabla_\theta \log \pi_\theta(\text{combo})
+\cdot r$, avec un poids uniforme dans le batch --- c'est exactement la forme (b).
+Voilà pourquoi la loss GRPO n'a pas été modifiée : tout le SNIS vit dans le tirage
+pondéré, et plus aucune trace de $\omega$ ne sort de la fonction de recombinaison.
+
+\section{Hypothèses utilisées par cette dérivation (et où elle craque)}
+
+\begin{enumerate}
+  \item \textbf{$N$ identique pour toutes les trajectoires.} La dérivation suppose
+  que chaque somme $\sum_{s_k}$ porte sur les mêmes $G$ candidats. En pratique les
+  épisodes ont des longueurs différentes : le code restreint le support aux
+  trajectoires possédant un tour $k$, et termine un combo quand il consomme le
+  dernier tour de sa source. L'équation \eqref{eq:normalisation} reste vraie sur le
+  support restreint, donc le télescope tient --- mais la \emph{loi} échantillonnée
+  n'est plus exactement celle de la formule idéalisée.
+  \item \textbf{$f$ ne dépend des indices que via les tours recousus.} Vrai pour
+  $\nabla \log \pi$ ; pour $r$, on utilise l'hypothèse de la note ($r$ fonction de
+  $x$ et du dernier tour seulement) --- c'est l'approximation « reward hérité de la
+  source du dernier tour ».
+  \item \textbf{$r$ remplacé par l'avantage GRPO.} TRL centre et réduit les rewards
+  par groupe de $G$. Le baseline $b$ ajoute un terme
+  $-b \cdot \frac{1}{G}\sum_m \nabla \log \pi(\text{combo}_m)$ dont l'espérance
+  sous l'échantillonnage SNIS n'est qu'\emph{approximativement} nulle (elle l'est
+  exactement en on-policy pur). Petit biais supplémentaire.
+\end{enumerate}
+
+\section*{Correspondance formule $\leftrightarrow$ code}
+
+\begin{center}
+\begin{tabular}{l l}
+\hline
+\textbf{Objet mathématique} & \textbf{Code (\texttt{src/train/train\_grpo\_snis.py})} \\
+\hline
+Poids $\omega$ \eqref{eq:poids} (normalisation) & \texttt{\_snis\_weights}, l.~304--312 \\
+Numérateurs $\pi(z^k_l \mid \text{préfixe})$ & jobs l.~373--377, \texttt{score\_fn} l.~380 \\
+$\log \pi(\text{séquence}) = \sum_t \log \pi(\text{token}_t)$ & l.~392 \\
+Support de $\sum_{s_k}$ (candidats du tour $k$) & l.~370 \\
+Énumération de $\frac{1}{G}\sum_{s_1}$ (combo $m \Rightarrow s_1 = m$) & l.~333--346 \\
+Un niveau $\sum_{s_k}$ = une itération & boucle \texttt{while}, l.~348--409 \\
+Tirage $s_k \sim \w{\cdot}{\text{préfixe}}$ (étape 5) & \texttt{rng.choices}, l.~399--400 \\
+Extension du préfixe (fixer $s_k$) & \texttt{\_append\_turn}, l.~404--405 \\
+$\nabla \log \pi \times$ avantage (forme (b)) & TRL \texttt{grpo\_trainer.py}, l.~2479--2498 \\
+Masquage des observations dans $\log \pi$ & \texttt{env\_mask} $\to$ TRL l.~1762, l.~2327 \\
+Avantage par groupe de $G$ & TRL l.~2146--2168 \\
+\hline
+\end{tabular}
+\end{center}
+
+\end{document}

@@ -1,0 +1,485 @@
+% =============================================================================
+% SOUTENANCE — 30 minutes (~22 diapositives + annexes pour les questions)
+% Compiler avec pdfLaTeX. Les figures sont celles du rapport (dossier figures/).
+% Plan minuté (indicatif) :
+%   1-3   Contexte et question               3 min
+%   4-6   Cadre : AgentGym-RL, TextCraft, GRPO 4 min
+%   7-11  Travail 1 : stabilisation           8 min
+%   12-16 Travail 2 : curriculums             8 min
+%   17-19 Analyses : pass@k, Qwen3.5, compute 4 min
+%   20-22 Limites, ouverture, conclusion      3 min
+% =============================================================================
+\documentclass[aspectratio=169,11pt]{beamer}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[french]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usetheme{default}
+\usecolortheme{seagull}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{footline}[frame number]
+\setbeamertemplate{itemize items}[circle]
+\setbeamerfont{frametitle}{size=\large,series=\bfseries}
+\setbeamercolor{frametitle}{fg=black}
+\setbeamercolor{title}{fg=black}
+\definecolor{accent}{HTML}{2A78D6}
+\setbeamercolor{structure}{fg=accent}
+\newcommand{\src}[1]{{\tiny\textcolor{gray}{#1}}}
+
+\title{Auto-amélioration des agents LLM en environnement multi-tour}
+\subtitle{Stabilité et efficience de l'apprentissage par renforcement sur TextCraft}
+\author{Vadim Lagresle \\ \small Encadrants : Alberto Lumbreras, Patrick Gallinari, Alain Rakotomamonjy, Sylvain Lamprier}
+\institute{Criteo AI Lab}
+\date{Soutenance de stage, septembre 2026}
+
+\begin{document}
+
+\begin{frame}[plain]
+\titlepage
+\end{frame}
+
+% =====================================================================
+\section{Contexte et question}
+
+\begin{frame}{Où en est l'apprentissage des agents LLM}
+\begin{columns}[T]
+\column{0.55\textwidth}
+\begin{itemize}
+    \item Le signal d'apprentissage a changé trois fois : imiter le web, plaire à l'humain (RLHF), \textbf{avoir raison} (RLVR : récompense vérifiable 0/1).
+    \item L'agent : un LLM dans une boucle observation~$\to$~action~$\to$~observation, récompensé à la fin de l'épisode.
+    \item Constat des constructeurs (Qwen, Kimi) : le facteur limitant n'est plus la donnée annotée, c'est \textbf{l'environnement d'entraînement}.
+\end{itemize}
+\column{0.42\textwidth}
+\begin{block}{Une thèse à mettre à l'épreuve}
+« Le RL ne fait qu'\emph{aiguiser} ce que le modèle de base savait déjà faire » (Huang et al. 2024, Yue et al. 2025).
+\end{block}
+\end{columns}
+\end{frame}
+
+\begin{frame}{La question du stage}
+\begin{itemize}
+    \item Sujet initial : l'auto-amélioration des agents, avec pour horizon les \textbf{agents d'achat} de Criteo.
+    \item Le passage à l'échelle des environnements appartient aux constructeurs. Notre question commence \emph{une fois l'environnement donné} :
+\end{itemize}
+\begin{center}
+\Large Comment un modèle donné s'améliore-t-il au mieux sur un environnement donné ?\\[4pt]
+\normalsize Deux axes : \textbf{stabilité} de l'apprentissage, \textbf{efficience} du calcul.
+\end{center}
+\begin{itemize}
+    \item Terrain : TextCraft (AgentGym-RL), 3 milliards de paramètres, \textbf{un seul GPU}.
+    \item Point de départ : répliquer un système publié, puis isoler la difficulté un mécanisme à la fois.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Ce que je vais montrer}
+\begin{enumerate}
+    \item \textbf{Stabiliser} : LoRA remplace le full finetuning mais s'effondre ; une \emph{ancre KL mobile} le répare. 69~\% $\to$ 73~\%.
+    \item \textbf{Structurer} : trois curriculums à recette identique ; sans curriculum l'entraînement s'effondre, avec, il atteint \textbf{82~\%} (papier : 75~\%).
+    \item \textbf{Comprendre} : un mécanisme, « qui produit du gradient », qui rend compte du collapse et de la protection.
+    \item \textbf{Relativiser} : un modèle récent fait 78~\% sans entraînement ; la valeur est dans le mécanisme, pas dans le chiffre.
+\end{enumerate}
+\end{frame}
+
+% =====================================================================
+\section{Cadre}
+
+\begin{frame}{AgentGym-RL et TextCraft}
+\begin{columns}[T]
+\column{0.5\textwidth}
+\textbf{AgentGym-RL} (Xi et al., ICLR 2026)
+\begin{itemize}
+    \item Plateforme de RL multi-tour, 5 scénarios ; Qwen2.5-3B $\to$ 75~\% sur TextCraft.
+    \item ScalingInter : curriculum sur le nombre de tours.
+    \item Pas d'époques, pas de configuration 3B, pas de courbes : une boîte noire à répliquer.
+\end{itemize}
+\column{0.5\textwidth}
+\textbf{TextCraft}
+\begin{itemize}
+    \item Crafting textuel ; trois actions : \texttt{get}, \texttt{craft}, \texttt{inventory}.
+    \item Difficulté = profondeur de l'arbre de recette ($d = 1$ à $4$).
+    \item 374 tâches d'entraînement, 100 de test ; \textbf{une seule} tâche de profondeur 4 à l'entraînement.
+    \item Vérificateur exact, récompense binaire, 30 tours au plus.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+\begin{frame}{GRPO en une diapositive}
+\begin{itemize}
+    \item Pour une tâche, $G$ trajectoires ; récompenses $R_1,\dots,R_G$ ; avantage relatif
+    \[ \hat A_i = \frac{R_i - \mathrm{mean}(\mathbf R)}{\mathrm{std}(\mathbf R)+\delta} \]
+    \item Pénalité KL vers une politique de référence $\pi_{\text{ref}}$, coefficient $\beta$.
+    \item En multi-tour : les observations de l'environnement restent dans la séquence mais sont \textbf{masquées} du gradient.
+\end{itemize}
+\begin{block}{La propriété qui traverse tout le rapport}
+Un groupe tout réussi ou tout échoué a un avantage nul : \textbf{zéro gradient}. Seuls les groupes \emph{mixtes} apprennent.
+\end{block}
+\end{frame}
+
+\begin{frame}{Protocole}
+\begin{itemize}
+    \item Qwen2.5-3B-Instruct, GRPO, 64 trajectoires par mise à jour, strictement on-policy.
+    \item Évaluation : pass@1 sur les 100 tâches de test, tous les 47 pas, température 1 ; incertitude $\approx$ 3 points.
+    \item Chiffre mis en avant : le \textbf{plateau} (moyenne des dix dernières évaluations) ; le meilleur score en second.
+    \item Zéro-shot de référence : 10,3~\% (moyenne de 20 passes).
+    \item Un run par configuration ; toutes les recettes et journaux publiés.
+\end{itemize}
+\end{frame}
+
+% =====================================================================
+\section{Travail 1 : stabiliser}
+
+\begin{frame}{Deux conditions avant tout}
+\begin{columns}[T]
+\column{0.5\textwidth}
+\textbf{Masquer sans retirer}
+\begin{itemize}
+    \item Le gradient ne doit porter que sur les actions\dots
+    \item \dots mais les observations doivent rester dans la séquence : sinon les log-probabilités sont recalculées hors contexte.
+    \item Défaut silencieux : la perte décroît, le modèle n'apprend pas.
+\end{itemize}
+\column{0.5\textwidth}
+\textbf{Ne pas façonner la récompense}
+\begin{itemize}
+    \item Bonus de forme (+0,02 par action valide) : la politique apprend à \emph{abandonner vite}.
+    \item Dans un groupe sans réussite, le bonus est le seul terme qui varie.
+    \item Récompense binaire conservée ; leçon partagée avec DeepSeek-R1.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Réplication en full finetuning : stable, lente, coûteuse}
+\begin{columns}[T]
+\column{0.58\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_fullft_stabilite.pdf}
+\column{0.4\textwidth}
+\begin{itemize}
+    \item Hyperparamètres du papier, pris dans son code.
+    \item 40~\% à 30 époques (papier : 75) ; 69~\% après 247 époques, plateau 61.
+    \item Aucun collapse : KL lente, entropie qui s'affûte.
+    \item 238 heures GPU, 8 Go d'optimiseur par sauvegarde : impossible d'enchaîner les expériences.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+\begin{frame}{LoRA : cent fois moins de mémoire, et une dérive géométrique}
+\begin{columns}[T]
+\column{0.58\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_kl_lora_vs_fullft.pdf}
+\column{0.4\textwidth}
+\begin{itemize}
+    \item Recette \emph{LoRA Without Regret} (LR $\times$10) : collapse immédiat.
+    \item Grille rang $\times$ LR $\times$ $\beta$ : aucune zone stable.
+    \item Full-FT : KL $+10^{-3}$ par époque. LoRA à référence fixe : $\times$5 à 10 toutes les 2 époques.
+    \item $\beta$ retarde, le rang accélère, rien ne sauve.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Le correctif : une ancre KL mobile}
+\begin{columns}[T]
+\column{0.6\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_anchor_square.pdf}
+\column{0.38\textwidth}
+\begin{itemize}
+    \item Toutes les 4 époques : fusion de l'adaptateur, adaptateur vierge, référence = politique courante, optimiseur remis à zéro.
+    \item La KL reste à $10^{-3}$ ; 35~\% en 15 époques, 65 puis \textbf{73~\%}.
+    \item Croisement fixe/mobile $\times$ $\beta$ : c'est le régime de référence qui gouverne, pas $\beta$.
+    \item Retrouvé indépendamment : ProRL (NVIDIA, NeurIPS 2025).
+\end{itemize}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Deux modes de collapse}
+\begin{columns}[T]
+\column{0.6\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_collapse_signals.pdf}
+\column{0.38\textwidth}
+\begin{itemize}
+    \item \textbf{Référence fixe} : la KL croît géométriquement, l'entropie monte puis chute d'un coup.
+    \item \textbf{$G=16$ sans curriculum} : la KL reste à $10^{-3}$, l'entropie décroît lentement, puis tout casse.
+    \item L'ancre mobile règle le premier mode. Pas le second.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+% =====================================================================
+\section{Travail 2 : structurer}
+
+\begin{frame}{Trois curriculums à recette identique}
+\begin{itemize}
+    \item Recette commune : LoRA $r=8$, LR $3\cdot10^{-6}$, $\beta=10^{-2}$, ancre mobile /4 époques, $G=16$, 80 époques.
+    \item \textbf{Horizon} : 10 tours, puis 20, puis 30 (ScalingInter).
+    \item \textbf{Budget} : 256 tokens par tour, puis 512, puis 1024.
+    \item \textbf{Profondeur} : recettes de profondeur $\le 1$, puis $\le 2$\dots ; palier suivant quand la récompense d'entraînement dépasse 0,8.
+    \item Deux références sans curriculum : $G=8$ (73~\%) et \textbf{$G=16$} (le contrôle).
+\end{itemize}
+\begin{block}{Deux leviers}
+Ordonner les tâches (profondeur), ou doser les moyens de l'agent (horizon, budget).
+\end{block}
+\end{frame}
+
+\begin{frame}{Résultat central : sans curriculum ça casse, avec, ça tient}
+\begin{columns}[T]
+\column{0.62\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_curricula_pass1_entropy.pdf}
+\column{0.36\textwidth}
+\begin{itemize}
+    \item Contrôle $G=16$ : 54~\% puis collapse à l'époque 10.
+    \item Horizon : \textbf{82~\%} (plateau 78) ; Budget 80 (75) ; Profondeur 80 (74).
+    \item Le curriculum n'empêche pas l'entropie de décroître ; il empêche son effondrement.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Même ordre d'acquisition, mêmes erreurs éliminées, plus vite}
+\begin{columns}[T]
+\column{0.5\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_curricula_depths.pdf}
+\column{0.5\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_curricula_errors.pdf}
+\end{columns}
+\begin{itemize}
+    \item Profondeur 1 en 5 époques, 2 vers 90~\%, 3 entre 30 et 45~\%, 4 jamais ; les curriculums accélèrent sans changer l'ordre.
+    \item Erreurs de forme en moins de 1\,000 mises à jour ; erreurs de planification lentes.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Le mécanisme : qui produit du gradient}
+\begin{itemize}
+    \item Seuls les groupes \emph{mixtes} apprennent. Sans curriculum, à 30 tours, les tâches difficiles sont mixtes dès le début : une réussite courte et routinière (\textbf{exploitation}, renforcée) contre quinze échecs longs pleins d'actions rares (\textbf{exploration}, punie token par token).
+    \item Cui et al. 2025 : l'entropie baisse quand le probable est récompensé et l'improbable puni. Rien ne la recharge. Au plancher, la KL explose.
+    \item Le curriculum choisit \emph{quand} chaque tâche a le droit de produire du gradient : les tâches hors de portée ne sont pas punies, les échecs sont courts, et les réussites du palier suivant viennent d'actions rares.
+    \item Corollaire : $G=16$ crée plus de groupes mixtes à longs échecs dès le départ, donc casse plus tôt.
+\end{itemize}
+\src{Hypothèse cohérente avec toutes nos courbes ; deux maillons non mesurés directement.}
+\end{frame}
+
+\begin{frame}{À compute égal}
+\begin{columns}[T]
+\column{0.6\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_pass1_tokens.pdf}
+\column{0.38\textwidth}
+\small
+\begin{tabular}{lrrr}
+\toprule
+ & h GPU & tokens & plateau \\
+\midrule
+Full-FT & 238 & 0,87 G & 61 \\
+G=8 & 70 & 0,62 G & 70 \\
+Horizon & 48 & 0,45 G & \textbf{78} \\
+Budget & 51 & 0,43 G & 75 \\
+Profondeur & 66 & 0,56 G & 74 \\
+\bottomrule
+\end{tabular}
+\vspace{4pt}
+\begin{itemize}
+    \item Les curriculums de budget coupent les épisodes : moins chers par pas.
+    \item Plus haut et plus tôt ; asymptotes inconnues.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+% =====================================================================
+\section{Analyses}
+
+\begin{frame}{L'hypothèse du plafond pass@$k$}
+\begin{itemize}
+    \item Yue et al. : à grand $k$, le modèle de base rattrape le modèle RL ; le RL concentre, il n'étend pas.
+    \item Modèle nu : pass@1 10~\%, pass@20 47~\%. Profondeur 2 : mur de fiabilité (44~\% atteignable). Profondeurs 3 et 4 : mur de capacité (0 sur 500 tirages).
+    \item Un modèle entraîné modestement (32~\%) résout à 20 tirages 14 tâches de profondeur 2 et 2 de profondeur 3 que le modèle nu ne résolvait jamais.
+    \item Horizon : pass@1 \textbf{82} > pass@20 du modèle nu, 47.
+\end{itemize}
+\begin{block}{Lecture}
+Mise en tension, pas réfutation : $k=20$ est petit, et leur RL est court. ProRL, qui entraîne longtemps, observe la même chose que nous.
+\end{block}
+\end{frame}
+
+\begin{frame}{Le modèle de départ compte autant que l'algorithme}
+\begin{itemize}
+    \item Qwen3.5-4B sans entraînement : \textbf{78,5~\%}, et 97~\% de pass@18. Un an après Qwen2.5.
+    \item Notre 82~\% après entraînement est presque atteint sans RL par un modèle plus récent.
+    \item La valeur du travail est donc dans les \emph{conditions} qui font réussir ou échouer l'entraînement : masquage, récompense, régime de référence, dosage de la difficulté. Elles ne dépendent pas du modèle.
+    \item Mesure manquante : un run court de la recette stabilisée sur Qwen3.5-4B.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Ce qu'on a essayé sans aboutir}
+\begin{itemize}
+    \item \textbf{SNIS} : recombiner des morceaux de trajectoires d'un même groupe. Casse la cohérence causale en multi-tour ; effondrement. Annexe B.
+    \item \textbf{Planification mono-tour $\leftrightarrow$ contrôle interactif} : la boucle de rétroaction vaut 23 points ; le RL interactif transfère peu vers la planification ; le RL de planification détruit le contrôle. Annexe D.
+    \item \textbf{Autocurriculum MAGELLAN} : la difficulté choisie par un estimateur appris. A désinvesti la profondeur 4 comme prédit, mais a amplifié l'instabilité : il suppose un apprenant stable. Annexe E.
+\end{itemize}
+\end{frame}
+
+% =====================================================================
+\section{Limites et ouverture}
+
+\begin{frame}{Limites}
+\begin{itemize}
+    \item Un run par configuration ; aucune graine répétée.
+    \item Un environnement, un modèle, une recette commune.
+    \item Jeu d'entraînement déséquilibré : une tâche de profondeur 4.
+    \item Écart 40 contre 75 à budget égal avec le papier : non expliqué, conditions du 3B non documentées.
+    \item Facteur confondu $G$ $\times$ tâches par pas : le contrôle $G=16$ voit 4 tâches par mise à jour au lieu de 8. Run en cours pour trancher.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Ouverture}
+\begin{columns}[T]
+\column{0.5\textwidth}
+\textbf{Directement actionnable}
+\begin{itemize}
+    \item Re-stratifier le jeu d'entraînement.
+    \item Répéter les runs décisifs.
+    \item Éprouver la recette sur d'autres environnements, WebShop d'abord.
+    \item Réutiliser les trajectoires hors-politique (collecte 256, 4 pas clippés).
+\end{itemize}
+\column{0.5\textwidth}
+\textbf{Questions ouvertes}
+\begin{itemize}
+    \item Combiner les curriculums.
+    \item Alterner planification et interaction (méta-apprentissage).
+    \item Faire choisir la difficulté par le modèle : indispensable pour un agent d'achat, où la difficulté n'est pas connue à l'avance.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Conclusion}
+\begin{itemize}
+    \item \textbf{Efficience} : LoRA rend la campagne possible ; sa recette publiée s'effondre en multi-tour ; l'ancre KL mobile la stabilise. 73~\%.
+    \item \textbf{Stabilité} : à grande taille de groupe, sans curriculum ça casse ; avec, ça tient. 82~\%, au-dessus du papier, sur un GPU.
+    \item \textbf{Mécanisme} : le curriculum contrôle qui produit du gradient, donc le compromis exploration-exploitation.
+    \item \textbf{Pour Criteo} : une synthèse, une infrastructure reproductible, et les conditions d'un entraînement qui réussit, prêtes à être adaptées au domaine de l'achat.
+\end{itemize}
+\vspace{6pt}
+\centering \large Merci. Questions ?
+\end{frame}
+
+% =====================================================================
+\appendix
+\section{Annexes}
+
+\begin{frame}{Annexe : le budget d'époques, le nôtre et le leur}
+\begin{itemize}
+    \item Leur script : 32 tâches $\times$ 8 trajectoires par collecte, 4 pas clippés, 30 époques $\approx$ 90\,000 trajectoires. Le papier ne donne ni époques ni courbes.
+    \item Nous : 64 trajectoires, 1 pas, on-policy ; 80 époques à $G=16$ $\approx$ 480\,000 trajectoires.
+    \item Même nombre de pas par époque à $G$ égal ; chaque trajectoire sert une fois dans les deux cas.
+    \item À recette identique : 40~\% à leur budget. Horizon dépasse 75~\% à l'époque 37 $\approx$ 220\,000 trajectoires, 2,5$\times$ leur budget annoncé.
+    \item 80 époques = budget d'observation des plateaux, pas une durée de convergence.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Annexe : pourquoi la collecte de 64 et pas 256}
+\begin{itemize}
+    \item 256 tourne sur un GPU : la réplication full-FT l'a fait. L'argument n'est pas matériel.
+    \item Choix de méthode : un pas par collecte $\Rightarrow$ ratio d'importance $\equiv 1$, clipping inerte, une politique fraîche à chaque mesure d'entropie et de KL. Un mécanisme à la fois.
+    \item Passer à 256 en 4 pas ajoute une région de confiance par clipping, de même nature que l'ancre mobile. Job écrit, pas lancé : suite directe.
+    \item Autre différence : 8 tâches $\times$ 8 chez eux, 4 $\times$ 16 chez nous par pas. Run en cours à 8 $\times$ 16 pour séparer $G$ du nombre de tâches.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Annexe : la KL, chiffres}
+\small
+\begin{tabular}{lccccc}
+\toprule
+Run & référence & $\beta$ & KL ép. 4-6 & KL ép. 8-10 & issue \\
+\midrule
+Full-FT & fixe & $10^{-3}$ & 0,004 & 0,008 & stable, 0,08 à 247 ép. \\
+LoRA r16 & fixe & $10^{-3}$ & 0,040 & 17,7 & collapse ép. 8-10 \\
+LoRA r16 & fixe & $10^{-2}$ & 0,007 & 8,0 & collapse ép. 8-10 \\
+LoRA r8 & fixe & $10^{-2}$ & 0,010 & 0,26 & collapse ép. 11 \\
+LoRA r8 & fixe & $10^{-4}$ & 0,047 & $10^{12}$ & divergence ép. 6-8 \\
+LoRA r8 & mobile & $10^{-2}$ & 0,001 & 0,001 & stable 111 ép., 73 \\
+LoRA r8 & mobile & $10^{-3}$ & 0,001 & 0,001 & stable 60 ép., 53 \\
+\bottomrule
+\end{tabular}
+\vspace{4pt}
+\begin{itemize}
+    \item Terme de politique $\approx 3\cdot10^{-3}$ ; $\beta\cdot$KL $= 10^{-5}$ en régime sain. Le frein n'engage qu'à KL $\approx 0{,}3$ : trop tard.
+    \item $\beta=10^{-2}$ et $10^{-3}$ indiscernables à référence mobile (48,9 vs 49,7 aux époques 49-58).
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Annexe : la récompense façonnée, en détail}
+\begin{itemize}
+    \item Schéma 1 : $+0{,}02$ si exactement une action, $-0{,}05$ sinon, $-0{,}01$ par action invalide (compte sur l'épisode concaténé).
+    \item Schéma 2 : même bonus tour par tour.
+    \item En vingt mises à jour : sorties sous 100 tokens, récompense moyenne $> 1$ sans aucune tâche résolue, groupes uniformes.
+    \item Mécanisme : dans un groupe sans réussite, le bonus est le seul terme qui varie $\Rightarrow$ avantage positif aux échecs courts.
+    \item Littérature : DeepSeek-R1 refuse les modèles de récompense appris (reward hacking) ; Shop-R1 empile cinq coefficients sans les justifier.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Annexe : incertitude d'une évaluation}
+\begin{itemize}
+    \item 100 tâches, tirage de Bernoulli chacune : $\sigma = \sqrt{p(1-p)/100} \le 5$ points.
+    \item Stratifié par profondeur, $\sigma^2 = \sum_d n_d p_d(1-p_d)/100^2$ : 3,1 à 3,4 points sur nos runs ; observé entre évaluations : 2,2 à 2,6.
+    \item Le meilleur score d'une courbe est un maximum sur $\sim$150 évaluations : biaisé vers le haut. D'où le plateau.
+    \item Zéro-shot : 18 en une passe, 10,3 en moyenne de vingt. Le 18 était un tirage chanceux.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Annexe : qui produit du gradient, mesuré}
+\begin{columns}[T]
+\column{0.62\textwidth}
+\includegraphics[width=\textwidth]{figures/explo_reward_groups.pdf}
+\column{0.36\textwidth}
+\begin{itemize}
+    \item (c) fraction de groupes sans gradient : Horizon démarre à 0,55-0,6 (tâches difficiles à 0/16), le contrôle à 0,45 puis descend à 0,35 avant de casser.
+    \item Tous convergent vers 0,6-0,7 par saturation des tâches faciles.
+\end{itemize}
+\end{columns}
+\end{frame}
+
+\begin{frame}{Annexe : erreurs classe par classe}
+\includegraphics[width=0.85\textwidth]{figures/fig_errors_by_type.pdf}
+\end{frame}
+
+\begin{frame}{Annexe : les deux autres axes de compute}
+\begin{columns}[T]
+\column{0.5\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_pass1_gpuhours.pdf}
+\column{0.5\textwidth}
+\includegraphics[width=\textwidth]{figures/fig_pass1_envturns.pdf}
+\end{columns}
+\begin{itemize}
+    \item Horizon : 78~\% en 6,3 millions de tours d'environnement ; full-FT : 61~\% en 12,4 millions.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Annexe : MAGELLAN, ce qui s'est passé}
+\begin{itemize}
+    \item Tête de compétence sur l'état caché du modèle, adaptateurs dédiés ; progrès = $|$prédiction $-$ prédiction retardée$|$ ; échantillonnage $\propto$ progrès, $\varepsilon$ de 1 à 0,2.
+    \item Prédiction écrite avant le run : désinvestir la profondeur 4. Vérifiée : $p(d_4)=0{,}0006$.
+    \item 45~\% à l'époque 6, collapse aux époques 7-8, plus tôt que le contrôle.
+    \item Le progrès mesure du changement ; un collapse est un changement : l'estimateur a concentré 79~\% de l'échantillonnage sur la profondeur 1 et accéléré la panne.
+    \item Condition d'emploi : un apprenant stable. Suite : le brancher sur une recette stabilisée par curriculum.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Annexe : planification mono-tour et contrôle multi-tour}
+\begin{itemize}
+    \item Qwen3.5-4B : 54~\% en plan complet rejoué, 77~\% en interactif. La boucle vaut 23 points.
+    \item Politique RL interactive : planification 12 $\to$ 19,5~\% (onze températures). Transfert réel mais faible.
+    \item RL de planification pure : 37~\% en plan, 9~\% en interactif. Détruit le protocole une action par tour.
+    \item Non testé : l'alternance des deux régimes. Dupoux, LeCun et Malik : apprendre par observation et par action, orchestrés.
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Annexe : références principales}
+\small
+\begin{itemize}
+    \item Xi et al. 2025, AgentGym-RL (ICLR 2026) ; Prasad et al. 2023, ADaPT (TextCraft).
+    \item Shao et al. 2024, GRPO ; Schulman et al. 2015 TRPO, 2017 PPO.
+    \item Hu et al. 2022, LoRA ; Schulman et al. 2025, LoRA Without Regret.
+    \item Liu et al. 2025, ProRL (reference reset) ; Cui et al. 2025, mécanisme d'entropie.
+    \item Yue et al. 2025, plafond pass@k ; Huang et al. 2024, sharpening.
+    \item Bengio et al. 2009 ; Narvekar et al. 2020 ; Gaven et al. 2025, MAGELLAN.
+    \item Skalse et al. 2022, reward hacking ; DeepSeek-R1 2025 ; Shop-R1 2026.
+\end{itemize}
+\end{frame}
+
+\end{document}
