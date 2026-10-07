@@ -147,7 +147,29 @@ def main() -> None:
     assert os.path.exists(os.path.join(ck, "adapter_model.safetensors"))
     assert os.path.exists(os.path.join(ck, "ref", "adapter_model.safetensors"))
 
+    # 8. --moving-ref-reset-adam : purge Adam de 'default' seulement, adaptateur intact.
+    #    (Les étapes 4-6 tournent sans optimizer sur le faux trainer : le mode par défaut n'y touche pas.)
+    model3 = tiny_model()
+    tr3 = fake_trainer(model3)
+    tr3.optimizer = torch.optim.AdamW([p for p in model3.parameters() if p.requires_grad], lr=1e-2)
+    cb3 = MovingRefAdapterCallback(every_epochs=4.0, anchors_dir=os.path.join(tmp, "anchors3"),
+                                   reset_adam=True)
+    cb3.attach(tr3)
+    model3(x).logits.float().pow(2).mean().backward()
+    tr3.optimizer.step()                                     # moments Adam non nuls, B ≠ 0
+    live_params = [p for n, p in model3.named_parameters() if "lora_" in n and ".default." in n]
+    assert all(p in tr3.optimizer.state for p in live_params)
+    pol3 = logits(model3, x, "default")
+    cb3.on_step_end(None, SimpleNamespace(global_step=10, epoch=4.0), None)
+    assert all(p not in tr3.optimizer.state for p in live_params), "moments Adam non purgés"
+    assert torch.allclose(logits(model3, x, "default"), pol3, atol=1e-6), "l'adaptateur ne doit pas bouger"
+    assert torch.allclose(logits(model3, x, "ref"), pol3, atol=1e-6), "ref = politique après copie"
+    import json
+    last = json.loads(open(os.path.join(tmp, "anchors3", "chain.jsonl")).read().splitlines()[-1])
+    assert last["adam_purged"] == len(live_params), last
+
     print(f"[selftest_moving_ref] OK — {n_ref} tenseurs ref, KL avant copie {kl_before:.4f}, "
+          f"reset Adam : {last['adam_purged']} états purgés, politique inchangée ; "
           f"nulle après ; merge vLLM = default seul (écart aller-retour {diff:.1e}) ; reprise cycle1 OK ; ckpt avec sous-dossier ref "
           f"({tmp})")
 

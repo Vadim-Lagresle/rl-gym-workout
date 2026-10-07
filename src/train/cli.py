@@ -72,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "et un adaptateur figé 'ref' recopié depuis le vivant toutes les N "
                              "epochs, lu par TRL comme référence KL. Sépare « référence mobile » "
                              "de « merge-and-restart ». Détail : kl_anchor.MovingRefAdapterCallback.")
+    parser.add_argument("--moving-ref-reset-adam", action="store_true", default=False,
+                        help="Mode 'ref' uniquement (exp49, test « Adam ou adaptateur ? ») : à chaque "
+                             "ré-ancrage, purge AUSSI les moments Adam de l'adaptateur vivant (comme "
+                             "le mode merge), sans fusionner ni réinitialiser l'adaptateur. Tient → "
+                             "c'est le reset d'Adam qui stabilise ReLoRA ; collapse comme exp46 → "
+                             "c'est le reset de B·A.")
     parser.add_argument("--moving-anchor-initial-cycle", type=int, default=0,
                         help="Reprise (--resume-from-checkpoint) d'un run à ancre mobile : nombre "
                              "de ré-ancrages DÉJÀ effectués par le run d'origine (cf. chain.jsonl). "
@@ -293,6 +299,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "ni le modèle final dans out_dir. Seul le callback d'éval sauve "
                              "<run>_best, et uniquement quand le Pass@1 test s'améliore. "
                              "Évite de saturer le disque et de perdre le best (cf. exp10.3).")
+    parser.add_argument("--no-final-merged-save", action="store_true", default=False,
+                        help="LoRA : ne PAS écrire le modèle final fusionné (~6,4 Go) à la racine "
+                             "de out_dir en fin de run. Les checkpoints périodiques et <run>_best "
+                             "restent actifs (contrairement à --save-best-only). Le modèle final "
+                             "reste reconstructible (chaîne d'ancres + dernier checkpoint). Règle "
+                             "disque home du 29/09.")
     parser.add_argument("--use-vllm-inprocess", action="store_true", default=False,
                         help="Moteur vLLM colocate GÉRÉ PAR TRL (use_vllm=True, vllm_mode='colocate') : "
                              "génération rapide avec prefix caching, poids synchronisés EN MÉMOIRE "

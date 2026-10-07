@@ -185,7 +185,10 @@ def main() -> None:
     # Sauvegarde finale garantie (sauf smoke). On matérialise les poids finaux à la racine
     # de out_dir comme un modèle HF COMPLET (pas juste l'adapter en LoRA) pour que l'éval
     # (start_vllm_server.sh + eval) et le chaînage --model-path fonctionnent direct.
-    if not is_smoke and not args.save_best_only:
+    if args.no_final_merged_save:
+        print("[train] --no-final-merged-save : modèle final fusionné NON écrit (checkpoints "
+              "périodiques et best conservés)", flush=True)
+    elif not is_smoke and not args.save_best_only:
         final_model = trainer.accelerator.unwrap_model(trainer.model)
         vllm_engine.save_model_for_vllm(final_model, str(out_dir))  # full-ft: direct ; LoRA: merged
         tokenizer.save_pretrained(str(out_dir))

@@ -160,10 +160,14 @@ class MovingRefAdapterCallback(TrainerCallback):
     REF = "ref"
 
     def __init__(self, every_epochs: float, anchors_dir: str,
-                 initial_cycle: int = 0) -> None:
+                 initial_cycle: int = 0, reset_adam: bool = False) -> None:
         self.every = every_epochs
         self.anchors_dir = anchors_dir
         self.cycle = initial_cycle
+        # reset_adam (--moving-ref-reset-adam, test « Adam ou adaptateur ? ») : purge en plus
+        # les moments Adam de l'adaptateur vivant à chaque ré-ancrage, comme l'étape 4 du mode
+        # merge — l'adaptateur, lui, n'est toujours ni fusionné ni réinitialisé.
+        self.reset_adam = reset_adam
         self.trainer_ref: Any = None
 
     # ---- appelé UNE fois après la création du GRPOTrainer (avant train()) ----
@@ -225,6 +229,15 @@ class MovingRefAdapterCallback(TrainerCallback):
         self._freeze_ref(model)
         return n
 
+    def purge_adam(self, model: Any, live: str) -> int:
+        """Même purge que l'étape 4 de MovingAnchorCallback, restreinte à l'adaptateur vivant."""
+        opt = self.trainer_ref.optimizer
+        while hasattr(opt, "optimizer"):
+            opt = opt.optimizer
+        lora_params = [p for n, p in model.named_parameters()
+                       if "lora_" in n and f".{live}." in n]
+        return sum(1 for p in lora_params if opt.state.pop(p, None) is not None)
+
     def on_step_end(self, targs: Any, state: Any, control: Any, **kwargs: Any) -> None:
         if state.epoch is None or state.epoch + 1e-9 < (self.cycle + 1) * self.every:
             return
@@ -239,14 +252,18 @@ class MovingRefAdapterCallback(TrainerCallback):
         cycle_dir = os.path.join(self.anchors_dir, f"cycle{self.cycle}")
         model.save_pretrained(cycle_dir, selected_adapters=[live])
         n = self.copy_live_to_ref(model)
+        n_purged = self.purge_adam(model, live) if self.reset_adam else 0
         os.makedirs(self.anchors_dir, exist_ok=True)
         with open(os.path.join(self.anchors_dir, "chain.jsonl"), "a") as f:
             f.write(json.dumps({"cycle": self.cycle, "step": state.global_step,
-                                "epoch": round(float(state.epoch), 3), "mode": "ref"}) + "\n")
+                                "epoch": round(float(state.epoch), 3), "mode": "ref",
+                                "adam_purged": n_purged}) + "\n")
+        opt_msg = (f"{n_purged} états Adam purgés (adaptateur et base inchangés)" if self.reset_adam
+                   else "adaptateur, base et optimiseur inchangés")
         print(f"[moving-ref] >>> RÉ-ANCRAGE #{self.cycle} @ step {state.global_step} "
               f"(epoch {state.epoch:.2f}) : adaptateur vivant sauvé ({cycle_dir}), "
               f"{n} tenseurs A/B recopiés dans 'ref' — la référence KL est la politique de "
-              f"ce point ; adaptateur, base et optimiseur inchangés ({time.time() - t0:.1f}s)",
+              f"ce point ; {opt_msg} ({time.time() - t0:.1f}s)",
               flush=True)
         if hasattr(self.trainer_ref, "log"):
             self.trainer_ref.log({"anchor/cycle": float(self.cycle),

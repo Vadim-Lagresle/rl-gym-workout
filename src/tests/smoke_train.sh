@@ -8,7 +8,7 @@
 set -u
 cd "$(dirname "$0")/../.."
 MODE=${1:-merge}
-UTIL=${2:-0.3}
+UTIL=${2:-0.15}
 RUN=smoke_refacto_$MODE
 LOG=logs/$RUN.log
 export PATH="/tmp/envs/agentgym-rl-v2/bin:$PATH"

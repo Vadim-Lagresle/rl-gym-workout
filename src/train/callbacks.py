@@ -148,6 +148,10 @@ def build_callbacks(args: argparse.Namespace, fewshot_block: str | None,
               flush=True)
 
     anchor_cb = None
+    if args.moving_ref_reset_adam and (args.moving_anchor_mode != "ref"
+                                       or args.moving_anchor_every_epochs <= 0):
+        raise SystemExit("--moving-ref-reset-adam n'a de sens qu'avec --moving-anchor-mode ref "
+                         "et --moving-anchor-every-epochs > 0 (le mode merge purge déjà Adam).")
     if args.moving_anchor_every_epochs > 0:
         if args.full_ft:
             raise SystemExit("--moving-anchor-every-epochs nécessite LoRA : avec PEFT l'ancre "
@@ -164,14 +168,19 @@ def build_callbacks(args: argparse.Namespace, fewshot_block: str | None,
             raise SystemExit("--moving-anchor-initial-cycle > 0 n'a de sens qu'avec "
                              "--resume-from-checkpoint (reprise d'un run à ancre mobile).")
         anchors_dir = str(REPO_ROOT / "saves" / "trl_grpo" / f"{args.run_name}_anchors")
-        anchor_cls = (kl_anchor.MovingRefAdapterCallback if args.moving_anchor_mode == "ref"
-                      else kl_anchor.MovingAnchorCallback)
-        anchor_cb = anchor_cls(
-            every_epochs=args.moving_anchor_every_epochs, anchors_dir=anchors_dir,
-            initial_cycle=args.moving_anchor_initial_cycle)
+        if args.moving_anchor_mode == "ref":
+            anchor_cb = kl_anchor.MovingRefAdapterCallback(
+                every_epochs=args.moving_anchor_every_epochs, anchors_dir=anchors_dir,
+                initial_cycle=args.moving_anchor_initial_cycle,
+                reset_adam=args.moving_ref_reset_adam)
+        else:
+            anchor_cb = kl_anchor.MovingAnchorCallback(
+                every_epochs=args.moving_anchor_every_epochs, anchors_dir=anchors_dir,
+                initial_cycle=args.moving_anchor_initial_cycle)
         callbacks.append(anchor_cb)
         print(f"[moving-anchor] ancre KL mobile : "
               f"{'recopie default→ref (adaptateur figé)' if args.moving_anchor_mode == 'ref' else 'merge-and-restart'}"
+              f"{' + purge Adam' if args.moving_ref_reset_adam else ''}"
               f" toutes les "
               f"{args.moving_anchor_every_epochs:g} epochs — snapshots de chaîne dans "
               f"{anchors_dir}"
